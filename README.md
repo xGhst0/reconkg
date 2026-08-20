@@ -9,7 +9,7 @@ It does not scan anything, and it does not exploit anything.
 ## Install on Kali
 
 ```bash
-git clone https://github.com/xghst0/reconkg && cd reconkg && pip install -e . --break-system-packages && python -m reconkg.selfcheck
+git clone https://github.com/xGhst0/reconkg && cd reconkg && pip install -e . --break-system-packages && python -m reconkg.selfcheck
 ```
 
 That last step reports what it can and cannot see: whether nmap's `script.db`

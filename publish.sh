@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Publish reconkg to github.com/xghst0/reconkg.
+# Publish reconkg to github.com/xGhst0/reconkg.
 #
 # Run this from inside the unzipped reconkg directory:
 #
@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-USER="xghst0"
+USER="xGhst0"
 REPO="reconkg"
 REMOTE="https://github.com/${USER}/${REPO}.git"
 
