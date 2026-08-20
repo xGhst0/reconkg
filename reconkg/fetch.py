@@ -192,6 +192,21 @@ def _open(url: str, headers: Optional[dict] = None, timeout: int = 120):
     return urllib.request.urlopen(request, timeout=timeout)
 
 
+def _http_message(exc: urllib.error.HTTPError) -> str:
+    """NVD's own explanation, which it sends in a header and not the body.
+
+    An invalid API key is answered with **404 and `message: Invalid apiKey`**,
+    not 401 or 403. Dropping that header leaves the operator holding "HTTP 404
+    Not Found" against an endpoint that is up and serving, which reads as a
+    moved API -- so they go looking for a new URL instead of at their key.
+    Observed on a real pull.
+    """
+    try:
+        return (exc.headers.get("message") or "").strip()[:200]
+    except Exception:                      # pragma: no cover - defensive
+        return ""
+
+
 def _get_json(url: str, headers: Optional[dict] = None, retries: int = 4,
               timeout: int = 120) -> dict:
     """GET with backoff. NVD returns 503 under load routinely, not rarely."""
@@ -202,12 +217,15 @@ def _get_json(url: str, headers: Optional[dict] = None, retries: int = 4,
             with _open(url, headers, timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            last = f"HTTP {exc.code}"
+            detail = _http_message(exc)
+            last = f"HTTP {exc.code}" + (f" ({detail})" if detail else "")
             # 403/404 are terminal -- a bad API key or a moved endpoint does
             # not improve by asking again, and retrying a 403 sixteen times
             # looks like something reconkg should not look like.
             if exc.code in (400, 403, 404):
-                raise FetchError(f"{url} -> HTTP {exc.code} {exc.reason}")
+                raise FetchError(
+                    f"{url} -> HTTP {exc.code} {exc.reason}"
+                    + (f": {detail}" if detail else ""))
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             last = str(exc)
         if attempt < retries:

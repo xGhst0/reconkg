@@ -191,6 +191,17 @@ class _Handler(BaseHTTPRequestHandler):
         if route.path == "/forbidden":
             return self._send(403, b"nope", "text/plain")
 
+        if route.path == "/badkey":
+            # The real API's behaviour for an invalid key: 404, with the
+            # reason in a `message` header and an empty body. Written out
+            # rather than through `_send` because that helper takes no
+            # extra headers, and the header is the whole point.
+            self.send_response(404)
+            self.send_header("message", "Invalid apiKey")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
         self._send(404, b"", "text/plain")
 
 
@@ -252,6 +263,22 @@ def test_a_403_is_terminal(wired, tmp_path, server, monkeypatch):
 
     assert "403" in result.error
     assert len(attempts) == 1, f"retried a 403 {len(attempts)} times"
+
+
+def test_an_invalid_key_reports_nvds_own_explanation(wired, tmp_path, server,
+                                                     monkeypatch):
+    """NVD answers a bad key with 404 and `message: Invalid apiKey`.
+
+    The status alone is actively misleading: 404 against an endpoint that is
+    up and serving reads as a moved API, and sends the operator hunting for a
+    new URL rather than looking at their key. This cost a real pull.
+    """
+    monkeypatch.setattr(fetchmod, "NVD_API", f"{server}/badkey")
+    result = fetchmod.fetch_nvd(tmp_path, api_key="not-a-real-key")
+
+    assert "404" in result.error
+    assert "Invalid apiKey" in result.error, (
+        "NVD's own explanation was dropped; the operator sees a bare 404")
 
 
 def test_an_interrupted_pull_resumes_from_its_checkpoint(wired, tmp_path,
