@@ -52,6 +52,23 @@ python -m reconkg.app        # serves http://127.0.0.1:8765/ui
 python -m reconkg.console    # REPL
 ```
 
+**reconkg does not scan.** Adding a target and pressing *scan* re-runs
+correlation over evidence already in the graph; with no evidence it reports
+zero leads, correctly and forever. Run the scanner yourself and load what it
+found:
+
+```bash
+nmap -sV -oX ~/scans/host.xml 10.10.10.42
+export RECONKG_TOKEN='<the token app printed at startup>'
+python -m reconkg.push ~/scans/host.xml --scan
+```
+
+`-sV` is the part that matters: CVE matching needs product and version
+strings, and a bare port scan yields none.
+
+The console's `import` also loads an nmap file, but into that workspace's own
+private store — not the graph `app` serves. Use `push` for the web UI.
+
 `app` binds loopback only, with no flag to change it. This process holds your
 scan results and issues commands aimed at hosts you are testing; an SSH
 tunnel is a small price next to having that reachable from the rest of the

@@ -118,6 +118,33 @@ def record_provenance(db, feeds: Path, name: str,
                    fetched_at=_mtime_iso(path))
 
 
+def nvd_expected(feeds: Path) -> int:
+    """How many CVEs NVD said it had, from the fetch checkpoint.
+
+    The number is already on disk -- `fetch_nvd` records `totalResults` on
+    every page -- and until now nothing read it. Without it an interrupted
+    pull builds a corpus that reports itself healthy: 2,000 of 381,168 CVEs
+    is not empty, so the RC-44 check passes, and it was built seconds ago, so
+    the age check passes too. Every scan then answers "no leads" for the
+    99.5% of CVEs that are missing, with no indication anything is wrong.
+
+    Zero on anything unreadable: a missing checkpoint means a corpus
+    assembled by hand or copied between machines, and refusing to record
+    completeness is better than inventing a denominator.
+    """
+    path = Path(feeds) / "nvd" / "_checkpoint.json"
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return 0
+    if not isinstance(saved, dict):
+        return 0
+    try:
+        return max(int(saved.get("total") or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def iter_nvd_entries(feeds: Path) -> Iterator[VulnEntry]:
     """Stream entries from every NVD page file, one page resident at a time.
 
