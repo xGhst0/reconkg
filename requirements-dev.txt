@@ -1,0 +1,16 @@
+# Development dependencies. Mirrors [project.optional-dependencies].dev.
+# Runtime deps are pulled in rather than restated so there is one place to
+# change a runtime bound.
+-r requirements.txt
+
+pytest>=9.1.1
+pytest-asyncio>=1.4.0
+httpx>=0.28.1
+websockets>=16.1.1
+# Imported directly by the WebSocket tests, not just transitively via fastapi.
+starlette>=1.6.0
+# tests/test_packaging.py parses pyproject.toml; 3.10 has no tomllib.
+tomli>=2.0.1; python_version < "3.11"
+# tests/test_properties.py: the property-based suite over the command
+# boundary, the version comparator and the three corpora.
+hypothesis>=6.165.10

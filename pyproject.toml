@@ -1,0 +1,80 @@
+#  reconkg packaging.
+#
+#  This file exists because of RC-22. `defusedxml` was imported by
+#  `reconkg/importers.py` and declared nowhere, so a clean checkout ran the
+#  stdlib fallback -- which, until cycle 8, rejected every genuine nmap file.
+#  The dependency set below is therefore not documentation; it is the thing
+#  `tests/test_packaging.py` diffs the import graph against.
+#
+#  The version is static rather than `dynamic = {attr = "reconkg.__version__"}`
+#  on purpose: setuptools' attr resolution can fall back to *importing* the
+#  package, and `reconkg/__init__.py` imports fastapi and pydantic, so a
+#  dynamic version would make the build depend on the runtime deps already
+#  being present. A static string plus a test that pins it to
+#  `reconkg.__version__` gives the same guarantee without the import cycle.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reconkg"
+version = "0.3.0"
+description = "Asset knowledge graph and vulnerability-lead coordinator"
+readme = "BRIEF.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+keywords = ["security", "knowledge-graph", "nmap", "provenance"]
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+
+#  Lower bounds are the versions this tree is actually verified against
+#  (`pip show`), not aspirational minimums. defusedxml is a hard runtime
+#  dependency, not optional hardening: without it the importer runs the
+#  fallback parser, which is exactly the RC-22 failure.
+dependencies = [
+    "fastapi>=0.141.1",
+    "uvicorn>=0.52.3",
+    "pydantic>=2.13.4",
+    "defusedxml>=0.7.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "httpx>=0.28.1",
+    "websockets>=16.1.1",
+    #  The WebSocket tests import starlette directly. It arrives transitively
+    #  via fastapi, but relying on a transitive dep is the RC-22 shape all
+    #  over again, so it is named here.
+    "starlette>=1.6.0",
+    #  tests/test_packaging.py parses this file; 3.10 has no tomllib.
+    "tomli>=2.0.1; python_version < '3.11'",
+    #  tests/test_properties.py. The property suite is not optional colour:
+    #  it holds the safety boundary ("no generated input produces a composed
+    #  exploit command") as a statement over all inputs rather than over the
+    #  handful an author thought of, and five defects in cycle 10 came out of
+    #  it. The file `importorskip`s so a checkout without it still runs, and
+    #  a runner that silently skips the boundary tests is exactly the RC-22
+    #  shape this section exists to prevent -- hence declared, not assumed.
+    "hypothesis>=6.165.10",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["reconkg*"]
+exclude = ["tests*", "audit*"]
+
+#  Single source of pytest configuration. The former `pytest.ini` was deleted
+#  rather than kept: pytest reads whichever rootdir config it finds first and
+#  `pytest.ini` outranks `pyproject.toml`, so keeping both means the file that
+#  looks authoritative is silently ignored. That is the same class of bug as
+#  RC-22 -- a declaration nobody checks against the thing that actually runs.
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

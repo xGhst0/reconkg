@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+venv/
+.venv/
+
+# Corpora and feeds are built locally from data you fetch yourself.
+# They are large, they are someone else's licence to honour, and they go
+# stale -- none of which belongs in git.
+*.db
+*.db-wal
+*.db-shm
+feeds/
+snapshots/
+_fetch_manifest.json

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<?xml-stylesheet href="file:///tmp/nmaproot/usr/share/nmap/nmap.xsl" type="text/xsl"?>
+<!-- Nmap 7.80 scan initiated Sun Aug 16 20:55:50 2026 as: /tmp/nmaproot/usr/bin/nmap -sT -p 80,443 -&#45;host-timeout 5s -oX /sessions/charming-exciting-fermat/mnt/outputs/tests/fixtures/nmap_host_down.xml 192.0.2.99 -->
+<nmaprun scanner="nmap" args="/tmp/nmaproot/usr/bin/nmap -sT -p 80,443 -&#45;host-timeout 5s -oX /sessions/charming-exciting-fermat/mnt/outputs/tests/fixtures/nmap_host_down.xml 192.0.2.99" start="1786879550" startstr="Sun Aug 16 20:55:50 2026" version="7.80" xmloutputversion="1.04">
+<scaninfo type="connect" protocol="tcp" numservices="2" services="80,443"/>
+<verbose level="0"/>
+<debugging level="0"/>
+<runstats><finished time="1786879550" timestr="Sun Aug 16 20:55:50 2026" elapsed="0.03" summary="Nmap done at Sun Aug 16 20:55:50 2026; 1 IP address (0 hosts up) scanned in 0.03 seconds" exit="success"/><hosts up="0" down="1" total="1"/>
+</runstats>
+</nmaprun>
