@@ -16,7 +16,7 @@ from typing import Optional
 
 from fastapi import (Depends, FastAPI, HTTPException, Query, Response,
                      WebSocket, WebSocketDisconnect)
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 
 from . import auth
@@ -443,6 +443,7 @@ def _corpus_entry(name: str, resolver) -> dict:
             # different fact from a corpus that holds nothing.
             "configured": not kind.startswith("Null"),
             "demonstration_fixture": "demonstration fixture" in description,
+            "empty": "EMPTY corpus" in description,
             "not_checked": "not checked" in description
                            or "are unknown" in description,
             "stale": "STALE" in description}
@@ -488,16 +489,37 @@ async def corpus_status(
             "corpora": corpora}
 
 
+@app.get("/", include_in_schema=False)
+async def root() -> RedirectResponse:
+    """There was nothing here, so the first thing every new user saw was a
+    404 from their own tool."""
+    return RedirectResponse(url="/ui")
+
+
 @app.get("/ui", response_class=HTMLResponse, include_in_schema=False)
-async def ui_page(
-        principal: Principal = Depends(require_role(Role.VIEWER))
-        ) -> HTMLResponse:
+async def ui_page() -> HTMLResponse:
     """The single-page operator console. See reconkg/ui.py.
 
-    Behind the same `require_role(Role.VIEWER)` dependency as every other
-    read route. The document holds no engagement data -- it fetches all of it
-    over the authenticated API -- but serving it anonymously would still add
-    an anonymous ingress to a process that has had none since RC-06, and
+    Served WITHOUT authentication, which reverses the original decision, so
+    the reasoning matters.
+
+    It was behind `require_role(Role.VIEWER)` like every other read route.
+    That is defensible until you try to use it: a browser cannot attach an
+    `Authorization` header to a top-level navigation, so the page 401'd --
+    and the page is the thing that asks you for your token. You could not
+    authenticate because you could not load the form that authenticates you.
+    A UI nobody can open is not a security control, it is a broken feature,
+    and the practical result was operators reaching for a query-string token
+    instead, which is exactly what RC-12 removed.
+
+    What is actually being served anonymously: a static document with no
+    engagement data in it. Every byte it displays arrives later from
+    `/api/*`, all of which still require the bearer token, and the page
+    holds that token in `sessionStorage` for its own tab only. Loading it
+    without a credential shows empty panels.
+
+    So the anonymous surface added here is one constant HTML response on
+    loopback. The alternative was
     "it's only static" is how the first one always gets added.
 
     Consequence, stated rather than worked around: a browser cannot set an

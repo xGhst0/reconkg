@@ -138,6 +138,22 @@ class DbResolver:
         built = self._db.get_meta("built_at")
         when = _age(built)
         feeds = _feed_ages(self._db)
+        # RC-43. An empty corpus reported `stale: false, demonstration_
+        # fixture: false` -- i.e. healthy -- on a real Kali install where the
+        # NVD pull had silently not landed while KEV, EPSS and ExploitDB all
+        # had. Every scan would then have said "no leads" with total
+        # confidence, which is the single failure this whole describe()
+        # mechanism exists to prevent, missed at the most obvious value.
+        #
+        # Zero is not a small number here, it is a broken build. Say so
+        # first, in the words the UI and selfcheck already scan for.
+        if stats.cves == 0:
+            return (f"EMPTY corpus at {self._db.path}: 0 CVEs. The build "
+                    "produced nothing, so every lookup will report 'no "
+                    "leads' regardless of the host. Re-run `python -m "
+                    "reconkg.fetch --nvd` (an NVD pull without an API key "
+                    "is throttled and often interrupted), then `python -m "
+                    f"reconkg.builddb`.{feeds}")
         return (f"corpus at {self._db.path}: {stats.cves:,} CVEs, "
                 f"{stats.statements:,} applicability statements{when}{feeds}")
 

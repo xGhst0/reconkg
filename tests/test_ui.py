@@ -138,18 +138,18 @@ def test_progress_rides_the_existing_websocket_bus(client):
 # Authorisation: the same treatment as the peer routes
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("path", ["/ui", "/api/corpus"])
+@pytest.mark.parametrize("path", ["/api/corpus"])
 def test_new_routes_refuse_anonymous_callers(client, path):
     assert client.get(path).status_code == 401
 
 
-@pytest.mark.parametrize("path", ["/ui", "/api/corpus"])
+@pytest.mark.parametrize("path", ["/api/corpus"])
 def test_new_routes_refuse_a_bad_credential(client, path):
     assert client.get(path, headers={"Authorization": "Bearer " + "z" * 24}
                       ).status_code == 401
 
 
-@pytest.mark.parametrize("path", ["/ui", "/api/corpus"])
+@pytest.mark.parametrize("path", ["/api/corpus"])
 def test_new_routes_match_their_peers_exactly(client, path):
     """Not "is authenticated" but "authenticated the same way": the same
     status for the same credential as the routes beside it."""
@@ -163,9 +163,92 @@ def test_new_routes_match_their_peers_exactly(client, path):
 
 def test_the_ui_does_not_accept_a_token_in_the_query_string(client):
     """RC-12: a standing credential in a query string lands in access logs
-    and browser history. Tickets exist so it does not have to."""
-    assert client.get(f"/ui?token={VIEWER_T}").status_code == 401
+    and browser history. Tickets exist so it does not have to.
+
+    `/ui` now serves anonymously (see below), so the assertion moved: the
+    query string must not *authenticate* anything. The page loads either
+    way and the data routes still refuse.
+    """
     assert client.get(f"/api/corpus?token={VIEWER_T}").status_code == 401
+    assert client.get(f"/api/health?token={VIEWER_T}").status_code == 401
+    assert client.get(f"/api/targets?token={VIEWER_T}").status_code == 401
+
+
+# --------------------------------------------------------------------------- #
+# /ui is anonymous, and these say why
+#
+# It was behind require_role(VIEWER) with every other read route. That is
+# defensible right up until someone tries to use it: a browser cannot attach
+# an Authorization header to a top-level navigation, so the page 401'd -- and
+# the page is what asks you for your token. You could not authenticate
+# because you could not load the form that authenticates you. Reported from a
+# real Kali install.
+#
+# A UI nobody can open is not a control, it is a broken feature, and the
+# practical consequence was reaching for a query-string token, which is
+# exactly what RC-12 removed. The tests below pin the narrower promise that
+# replaced it: the shell is public on loopback, the data is not.
+# --------------------------------------------------------------------------- #
+
+def test_the_ui_shell_loads_without_a_credential(client):
+    """The circular-dependency fix. A browser must be able to reach the page
+    that asks for the token."""
+    response = client.get("/ui")
+    assert response.status_code == 200
+    assert "<html" in response.text.lower()
+
+
+def test_the_root_path_redirects_to_the_ui(client):
+    """`/` used to 404, so the first thing a new user saw was their own tool
+    reporting not-found."""
+    response = client.get("/", follow_redirects=False)
+    assert response.status_code in (301, 302, 307, 308)
+    assert response.headers["location"] == "/ui"
+
+
+def test_the_anonymous_shell_carries_no_engagement_data(client):
+    """The whole basis for serving it anonymously.
+
+    Two things are deliberately NOT leaks and the first draft of this test
+    flagged both, so they are named rather than left to be rediscovered:
+    `placeholder="10.10.10.42"` is a hint on an empty input, and the string
+    `"Bearer "` is the JavaScript literal that *builds* the header at
+    runtime. Neither carries a fact about a host or a credential.
+
+    What must never appear is a real token or data read out of the store.
+    """
+    body = client.get("/ui").text
+
+    assert VIEWER_T not in body, "a real token is baked into the page"
+    assert "reconkg-token" in body, (
+        "the page should reference sessionStorage, not hold a token")
+
+    import re
+    # A CVE id in the shell would mean it was rendered server-side from the
+    # corpus, which is the failure this test exists for. The word `CVE`
+    # appearing in a column heading is fine.
+    ids = re.findall(r"CVE-\d{4}-\d{4,7}", body)
+    assert ids == [], f"the anonymous page names real CVEs: {ids[:5]}"
+
+    # Any IPv4 outside the loopback/documentation ranges and the one
+    # placeholder would have to have come from somewhere real.
+    allowed = {"10.10.10.42", "127.0.0.1", "0.0.0.0"}
+    addresses = set(re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", body)) - allowed
+    assert addresses == set(), f"unexpected addresses in the shell: {addresses}"
+
+
+def test_the_shell_is_the_same_bytes_for_everyone(client):
+    """It is a constant. An anonymous response that varies by caller would
+    mean it is carrying state it should not have."""
+    assert client.get("/ui").text == client.get("/ui", headers=VIEWER).text
+
+
+@pytest.mark.parametrize("path", [
+    "/api/corpus", "/api/health", "/api/targets", "/api/catalog"])
+def test_every_data_route_still_refuses_anonymous_callers(client, path):
+    """The half that did not change, asserted loudly because the half that
+    did change is next door."""
+    assert client.get(path).status_code == 401
 
 
 def test_a_scoped_viewer_may_still_read_the_corpus_status(monkeypatch):
