@@ -30,6 +30,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+from xml.etree.ElementTree import ParseError
 
 from .auth import validate_address
 
@@ -149,7 +150,17 @@ def parse_nmap_xml(path: str | Path) -> ImportResult:
     if not file.is_file():
         raise FileNotFoundError(f"no such scan file: {file}")
 
-    tree = _safe_parse(str(file))
+    try:
+        tree = _safe_parse(str(file))
+    except ParseError as exc:
+        # `ParseError` subclasses `SyntaxError`, not `ValueError`, so it sails
+        # straight past every `except ValueError` written to mean "this file
+        # is not usable" -- the API's upload handler and the scan runner's
+        # both. Converted here, at the one function that parses, rather than
+        # at each call site: a caller that forgets is the shape this codebase
+        # keeps finding, and `run()` writing an empty file with `mkstemp`
+        # makes an nmap that exits 0 having written nothing hit exactly this.
+        raise ValueError(f"{file} is not well-formed XML: {exc}") from None
     root = tree.getroot()
     if root.tag != "nmaprun":
         raise ValueError(f"{file} is not nmap XML (root element <{root.tag}>)")

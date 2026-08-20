@@ -217,12 +217,19 @@ async def run(target: str, profile: str = DEFAULT_PROFILE, *,
 
     handle, xml_path = tempfile.mkstemp(prefix="reconkg-scan-", suffix=".xml")
     os.close(handle)
-    argv = build_argv(target, profile, xml_path)
-    run_record = ScanRun(target=target, profile=profile, argv=argv)
-    limit = timeout if timeout is not None else TIMEOUTS.get(profile, 1800.0)
-    started = time.monotonic()
 
+    # `build_argv` is inside the try, not above it. It raises on a bad
+    # address, an unknown profile and a missing nmap -- all three reachable
+    # from an authenticated caller -- and every one of those refusals used to
+    # leave a 0-byte file behind, once per attempt, growing without bound.
+    # That is RC-03/RC-18 in a directory instead of a dict.
     try:
+        argv = build_argv(target, profile, xml_path)
+        run_record = ScanRun(target=target, profile=profile, argv=argv)
+        limit = (timeout if timeout is not None
+                 else TIMEOUTS.get(profile, 1800.0))
+        started = time.monotonic()
+
         async with _slots:
             log.info("scanning %s with profile %s", target, profile)
             process = await asyncio.create_subprocess_exec(
