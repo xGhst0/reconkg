@@ -32,9 +32,14 @@ export RECONKG_EXPLOIT_DB=~/.reconkg/exploits.db
 export RECONKG_SCRIPT_DB=/usr/share/nmap/scripts/script.db
 ```
 
-Without the API key NVD throttles to 5 requests per 30 seconds and the full
-pull takes about four hours instead of twenty-five minutes. It checkpoints,
-so an interrupted pull resumes. `--since` pulls only what changed.
+The API key is optional and buys speed, nothing else. NVD is ~381,000 CVEs
+paged at 2000, so about 190 requests: roughly half an hour throttled to the
+unkeyed 5-per-30s, and under ten minutes keyed. It checkpoints, so an
+interrupted pull resumes. `--since` pulls only what changed.
+
+If a key is rejected, NVD answers **404 with a `message: Invalid apiKey`
+header** rather than 401 — a bare 404 against an endpoint that is up means
+the key, not a moved URL.
 
 If a corpus variable is set and the file cannot be opened, reconkg refuses to
 start. Quietly serving nine entries when you asked for 300,000 would mean a

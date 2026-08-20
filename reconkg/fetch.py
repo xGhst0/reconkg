@@ -14,10 +14,14 @@ that.
 
 Sources, all free and all published for this purpose:
 
-    NVD 2.0 API     ~300k CVEs, paged at 2000. Rate limited to 5 requests per
-                    30s without a key, 50 with one. Request a key at
-                    https://nvd.nist.gov/developers/request-an-api-key -- the
-                    full pull is roughly 25 minutes keyed, four hours not.
+    NVD 2.0 API     381k CVEs as of August 2026, paged at 2000 -- about 190
+                    requests. Rate limited to 5 per 30s without a key and 50
+                    with one, so roughly half an hour unkeyed and under ten
+                    minutes keyed. A key is optional and buys speed, nothing
+                    else: https://nvd.nist.gov/developers/request-an-api-key.
+                    NVD rejects an invalid key with **404 and a `message:
+                    Invalid apiKey` header**, not 401 or 403 -- so a bare 404
+                    against a healthy endpoint means the key, not the URL.
     CISA KEV        one JSON file, ~1400 entries, the active-exploitation set
     EPSS            one gzipped CSV, every CVE, regenerated daily
     ExploitDB       files_exploits.csv -- the index only. reconkg records
@@ -351,8 +355,10 @@ def fetch_nvd(dest: Path, api_key: Optional[str] = None,
     delay = NVD_DELAY_KEYED if api_key else NVD_DELAY_ANON
     if not api_key:
         log.warning("no NVD API key: throttled to 5 requests per 30s. The "
-                    "full pull will take hours. Set NVD_API_KEY to cut it to "
-                    "roughly 25 minutes.")
+                    "full pull is about 190 pages, so roughly half an hour; "
+                    "NVD_API_KEY cuts it to under ten minutes. It "
+                    "checkpoints and resumes either way, so an interruption "
+                    "costs the current page and nothing else.")
 
     saved = _read_checkpoint(checkpoint)
     # Survives every kind of restart: it is provenance about the corpus, not
