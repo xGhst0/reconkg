@@ -505,6 +505,16 @@ def default_specs() -> list[MetricSpec]:
         MetricSpec("reconkg_evidence_submissions_total",
                    "Evidence payloads accepted at the ingress, by principal.",
                    COUNTER, ("principal", "tool")),
+        #  The one counter that records reconkg generating traffic rather
+        #  than reading what another tool generated. Since the brief moved
+        #  the scanning boundary, "who scanned what, with which profile, and
+        #  did it finish" is the question an incident review opens with.
+        #  Every label is from a fixed vocabulary -- an authenticated
+        #  principal name, a key into `runner.PROFILES`, and ok/error -- so
+        #  no caller-supplied text can reach a series name (RC-23).
+        MetricSpec("reconkg_nmap_runs_total",
+                   "Scans reconkg executed itself, by profile and result.",
+                   COUNTER, ("principal", "profile", "result")),
         MetricSpec("reconkg_ratelimit_rejections_total",
                    "Requests refused by the per-principal token bucket.",
                    COUNTER, ("principal", "route")),

@@ -107,6 +107,17 @@ class ScannerMissing(ScannerError):
     """
 
 
+class ScannerTimeout(ScannerError):
+    """The scan ran past its ceiling and was killed.
+
+    A subclass rather than a flag because the HTTP layer maps it to 504
+    while a non-zero exit maps to 502, and those are genuinely different
+    facts: one says "this host is slow or filtered, try a smaller profile",
+    the other says "nmap refused the arguments". Discriminating on a
+    substring of the message would work until someone rewords the message.
+    """
+
+
 @dataclass
 class ScanRun:
     """What happened, in enough detail to explain a disappointing result."""
@@ -234,7 +245,7 @@ async def run(target: str, profile: str = DEFAULT_PROFILE, *,
         run_record.duration_s = time.monotonic() - started
 
         if run_record.timed_out:
-            raise ScannerError(
+            raise ScannerTimeout(
                 f"scan of {target} exceeded {limit:.0f}s and was stopped. "
                 f"Profile {profile!r} is the slow one -- try 'quick'.")
         if run_record.returncode != 0:

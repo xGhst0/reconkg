@@ -10,12 +10,13 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import tempfile
 import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import (Depends, FastAPI, HTTPException, Query, Response,
-                     WebSocket, WebSocketDisconnect)
+from fastapi import (Depends, FastAPI, HTTPException, Query, Request,
+                     Response, WebSocket, WebSocketDisconnect)
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -31,11 +32,13 @@ from .observability import (PROMETHEUS_CONTENT_TYPE, CorrelationMiddleware,
 from .ratelimit import RateLimiter
 from .snapshots import SnapshotManager
 from . import builtin_modules  # noqa: F401  -- registers built-ins
+from . import runner
 from .builtin_modules import module_pipeline
 from .catalog import ExploitCatalog
 from .engine import DiscoveryEngine, ScanReport
 from .events import ConnectionManager
 from .handoff import render_handoff
+from .importers import ingest, parse_nmap_xml
 from .modules import Rank, registry as module_registry
 from .planner import GapPlanner, render_plan
 from .resolver import exploits_from_env, scripts_from_env
@@ -49,6 +52,13 @@ log = logging.getLogger(__name__)
 MAX_TARGETS = 10_000
 MAX_REPORTS = 1_000
 MAX_EVIDENCE_BYTES = 512 * 1024
+
+MAX_IMPORT_BYTES = 16 * 1024 * 1024
+"""An `-sV` scan of a /24 runs to a few megabytes of XML, so 16 is generous
+for a lab and still small enough that an upload cannot become a memory event.
+Checked against `Content-Length` before the body is read *and* against the
+body after, because the header is caller-supplied and the point of the first
+check is only to refuse early."""
 
 
 class AppState:
@@ -193,6 +203,28 @@ class EvidenceIn(BaseModel):
     @classmethod
     def _address(cls, v: str) -> str:
         return validate_address(v)
+
+
+class NmapIn(BaseModel):
+    """A profile name and nothing else.
+
+    Deliberately not a flag list. `runner.PROFILES` is the entire vocabulary
+    a caller has, and the reason is written out there: filtering hostile
+    strings is a game this project has already lost three times (RC-31,
+    RC-32, RC-37). A model that accepted arguments would be a filter; one
+    that accepts a key into a fixed table is not.
+    """
+
+    profile: str = Field(default=runner.DEFAULT_PROFILE, max_length=32)
+
+    @field_validator("profile")
+    @classmethod
+    def _profile(cls, v: str) -> str:
+        if v not in runner.PROFILES:
+            raise ValueError(
+                f"unknown scan profile {v!r}; choose one of "
+                f"{', '.join(runner.profile_names())}")
+        return v
 
 
 def _require_unscoped(principal: Principal, route: str) -> None:
@@ -367,6 +399,207 @@ async def scan(
     record_scan_report(state.metrics, report)
     state.remember(target, report)
     return report.as_dict()
+
+
+# --------------------------------------------------------------------------- #
+# Evidence in: an uploaded scan, or one reconkg ran itself
+# --------------------------------------------------------------------------- #
+
+def _parse_uploaded_scan(raw: bytes):
+    """Parse uploaded bytes through the same path a file on disk takes.
+
+    Written to a 0600 temp file and handed to `parse_nmap_xml` rather than
+    parsed from memory. An in-memory parser would be a *second* parser --
+    second doctype guard, second host cap, second chance to forget one -- and
+    RC-07 is the entry in this project's own audit about what happens to
+    second paths. One parser, one set of bounds.
+    """
+    handle, temp = tempfile.mkstemp(prefix="reconkg-upload-", suffix=".xml")
+    try:
+        with os.fdopen(handle, "wb") as sink:
+            sink.write(raw)
+        return parse_nmap_xml(temp)
+    except ValueError as exc:
+        raise HTTPException(422, f"not usable nmap XML: {exc}") from None
+    finally:
+        try:
+            os.unlink(temp)
+        except OSError:                      # pragma: no cover - defensive
+            pass
+
+
+async def _stage_import(result, principal: Principal) -> dict:
+    """Scope-check every address in the file, then stage the lot.
+
+    Refuses the whole file if any address is out of scope rather than
+    skipping the offending hosts. A partial import would leave the operator
+    believing they had loaded a scan that is quietly missing hosts, and
+    "looks like it worked" is the failure mode this codebase keeps finding.
+    """
+    addresses = list(result.hosts) + [a for a in result.discovered_only
+                                      if a not in result.hosts]
+    if not addresses:
+        raise HTTPException(
+            422, "the file parsed but held no usable hosts. A scan of a down "
+                 "host produces exactly this.")
+    for address in addresses:
+        require_scope(principal, address)
+    if len(state.store.list_hosts()) + len(addresses) > MAX_TARGETS:
+        raise HTTPException(429, "target limit reached")
+
+    added = await ingest(result, state.store, state.evidence,
+                         principal=principal.name)
+    state.metrics.inc("reconkg_evidence_submissions_total",
+                      principal=principal.name, tool=result.service_tool)
+    if state.snapshots is not None:
+        state.snapshots.mark_dirty()
+    return {"source": result.source,
+            "hosts": added,
+            "ports": sum(len(h.get("ports", []))
+                         for h in result.hosts.values()),
+            "services": sum(len(h.get("services", []))
+                            for h in result.hosts.values()),
+            "warnings": list(result.warnings),
+            "discovered_only": list(result.discovered_only)}
+
+
+@app.get("/api/scanner")
+async def scanner_status(
+        principal: Principal = Depends(require_role(Role.VIEWER))) -> dict:
+    """Whether this installation can scan, and with what.
+
+    VIEWER because it describes the machine, not any host -- the same
+    reasoning as `/api/corpus`, and unlike `/metrics` it names no address.
+
+    The page calls it on load to decide whether to offer the control at all.
+    A disabled button carrying its reason beats one that fails on click:
+    "nmap is not installed" is a five-second fix an operator can only make if
+    somebody tells them.
+    """
+    path = runner.available()
+    return {"available": path is not None,
+            "path": path,
+            "profiles": runner.profile_names(),
+            "default_profile": runner.DEFAULT_PROFILE}
+
+
+@app.post("/api/import", status_code=201)
+async def import_scan(
+        request: Request,
+        principal: Principal = Depends(require_role(Role.OPERATOR))) -> dict:
+    """Load an nmap XML run into the graph. Body is the raw XML.
+
+    OPERATOR rather than SCANNER: an import defines targets *and* submits
+    evidence, and RC-13 split those deliberately -- an unattended scanner box
+    is the credential most likely to leak, and a leaked scanner token must
+    not be able to invent new targets to point the system at. An import
+    invents targets, so it sits at the higher tier.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > MAX_IMPORT_BYTES:
+                raise HTTPException(
+                    413, f"scan file too large (limit {MAX_IMPORT_BYTES} "
+                         "bytes)")
+        except ValueError:
+            pass          # malformed header; the body check below still runs
+
+    allowed, retry = state.limiter.check(principal.name, cost=5.0)
+    if not allowed:
+        state.metrics.inc("reconkg_ratelimit_rejections_total",
+                          principal=principal.name, route="import")
+        raise HTTPException(429, "import rate limit exceeded",
+                            headers={"Retry-After": str(int(retry) + 1)})
+
+    raw = await request.body()
+    if len(raw) > MAX_IMPORT_BYTES:
+        raise HTTPException(
+            413, f"scan file too large (limit {MAX_IMPORT_BYTES} bytes)")
+    if not raw.strip():
+        raise HTTPException(
+            422, "empty request body; POST the nmap XML itself, not a form")
+
+    return await _stage_import(_parse_uploaded_scan(raw), principal)
+
+
+@app.post("/api/targets/{address}/nmap", status_code=201)
+async def run_nmap(
+        address: str,
+        body: Optional[NmapIn] = None,
+        principal: Principal = Depends(require_role(Role.OPERATOR))) -> dict:
+    """Run nmap against a declared target and stage what it finds.
+
+    This is the route that puts packets on the wire, so three things guard
+    it rather than one.
+
+    **The target must already exist.** reconkg will not scan an address
+    nobody declared: `POST /api/targets` is the deliberate act, and requiring
+    it first means a scan can never be the moment an address enters the
+    system. A typo produces a 404, not traffic.
+
+    **OPERATOR, not SCANNER.** The role that gates target definition, for the
+    same reason as `/api/import` -- and now with more at stake, because since
+    the brief moved the scanning boundary `require_scope` decides where
+    traffic goes rather than merely what the graph believes.
+
+    **Cost 10.** RC-17 raised `/scan` to 5 for running the pipeline. This
+    runs an external process for minutes *and* generates traffic, so it draws
+    double again from the same bucket.
+    """
+    target = _get_target(address)
+    require_scope(principal, target)
+    if state.store.get(target) is None:
+        raise HTTPException(
+            404, f"no such target: {address}. POST /api/targets first -- "
+                 "reconkg does not scan an address nobody declared.")
+    profile = body.profile if body is not None else runner.DEFAULT_PROFILE
+
+    allowed, retry = state.limiter.check(principal.name, cost=10.0)
+    if not allowed:
+        state.metrics.inc("reconkg_ratelimit_rejections_total",
+                          principal=principal.name, route="nmap")
+        raise HTTPException(429, "scan rate limit exceeded",
+                            headers={"Retry-After": str(int(retry) + 1)})
+
+    outcome = "error"
+    try:
+        with correlation_scope(target=target, principal=principal.name):
+            try:
+                record = await runner.run(target, profile)
+            except runner.ScannerMissing as exc:
+                # 409 rather than 500: the request was correct and the
+                # machine is not configured for it. That is the operator's
+                # fix, not a bug, and the status should say which.
+                raise HTTPException(409, str(exc)) from None
+            except runner.ScannerTimeout as exc:
+                raise HTTPException(504, str(exc)) from None
+            except runner.ScannerError as exc:
+                raise HTTPException(502, str(exc)) from None
+            except ValueError as exc:
+                # `runner.build_argv` re-validates the address at the
+                # chokepoint. Reaching here means this route's check and the
+                # runner's disagreed about the same string, which is worth
+                # surfacing loudly rather than swallowing.
+                raise HTTPException(422, str(exc)) from None
+
+            payload = record.as_dict()
+            payload["staged"] = (
+                await ingest(record.result, state.store, state.evidence,
+                             principal=principal.name)
+                if record.result is not None else [])
+        outcome = "ok"
+    finally:
+        # Counted in a `finally` so a failed or timed-out scan lands too. A
+        # counter that only records successes cannot answer "which principal
+        # is hammering the scanner", which is the question it exists for.
+        state.metrics.inc("reconkg_nmap_runs_total",
+                          principal=principal.name, profile=profile,
+                          result=outcome)
+
+    if state.snapshots is not None:
+        state.snapshots.mark_dirty()
+    return payload
 
 
 @app.get("/api/targets/{address}/ledger")
