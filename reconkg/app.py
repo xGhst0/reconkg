@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -18,6 +19,7 @@ from fastapi import (Depends, FastAPI, HTTPException, Query, Response,
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, field_validator
 
+from . import auth
 from .auth import (TICKET_TTL_SECONDS, AuthError, Principal, Role, configure,
                    current_authenticator, on_auth_failure, require_principal,
                    require_principal_ws, require_role, require_scope,
@@ -709,3 +711,80 @@ async def ws(websocket: WebSocket,
         pass
     finally:
         await state.manager.disconnect(client_id)
+
+
+# --------------------------------------------------------------------------- #
+# Running it
+#
+# This was missing, and the README told people to run `python -m reconkg.app`
+# -- which imported the module, did nothing, and exited silently. No server,
+# no port, no error. The most annoying possible failure: it looks like it
+# worked.
+# --------------------------------------------------------------------------- #
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """Serve the UI and API on loopback.
+
+    Binds 127.0.0.1 and not 0.0.0.0, deliberately and without a flag to
+    change it. This process holds an operator's scan results and issues
+    commands aimed at hosts they are testing; the cost of it being reachable
+    from the rest of the network is much higher than the inconvenience of
+    an SSH tunnel for the rare case where remote access is genuinely wanted.
+    """
+    import argparse
+    import secrets
+
+    parser = argparse.ArgumentParser(prog="python -m reconkg.app")
+    parser.add_argument("--port", type=int,
+                        default=int(os.environ.get("RECONKG_PORT", "8765")))
+    parser.add_argument("--reload", action="store_true")
+    args = parser.parse_args(argv)
+
+    try:
+        import uvicorn
+    except ImportError:
+        print("uvicorn is not installed. pip install -e . --break-system-packages",
+              file=sys.stderr)
+        return 2
+
+    # Without RECONKG_TOKENS the app refuses to start -- correct for a
+    # deployment, useless for someone who just cloned it and wants to look at
+    # the UI. Mint a random one for this process only: it is never written to
+    # disk, it dies with the process, and it is printed to the operator's own
+    # terminal. Same shape as Jupyter's startup token.
+    minted = False
+    if not os.environ.get(auth.TOKEN_ENV, "").strip():
+        token = secrets.token_urlsafe(24)
+        os.environ[auth.TOKEN_ENV] = f"local:{Role.ADMIN.value}:{token}"
+        minted = True
+    else:
+        token = None
+
+    url = f"http://127.0.0.1:{args.port}"
+    print(flush=True)
+    print(f"  reconkg  ->  {url}/ui")
+    print(flush=True)
+    if minted:
+        print("  No RECONKG_TOKENS was set, so a token was generated for this", flush=True)
+        print("  session only. It is not saved anywhere and changes on restart.", flush=True)
+        print(flush=True)
+        print(f"    Authorization: Bearer {token}", flush=True)
+        print(flush=True)
+        print("  The UI needs that header, which a browser cannot attach to a", flush=True)
+        print("  plain navigation. Either use a header-injecting extension, or", flush=True)
+        print("  drive the API directly:", flush=True)
+        print(flush=True)
+        print(f"    curl -H 'Authorization: Bearer {token}' {url}/api/corpus", flush=True)
+        print(flush=True)
+        print("  To set your own instead:", flush=True)
+        print(f"    export {auth.TOKEN_ENV}='me:admin:<your-token>'", flush=True)
+        print(flush=True)
+
+    uvicorn.run("reconkg.app:app" if args.reload else app,
+                host="127.0.0.1", port=args.port, reload=args.reload,
+                log_level="info")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -43,8 +43,28 @@ scan that finds nothing and looks like it worked.
 ## Use it
 
 ```bash
-python -m reconkg.app        # web UI on localhost
+python -m reconkg.app        # serves http://127.0.0.1:8765/ui
 python -m reconkg.console    # REPL
+```
+
+`app` binds loopback only, with no flag to change it. This process holds your
+scan results and issues commands aimed at hosts you are testing; an SSH
+tunnel is a small price next to having that reachable from the rest of the
+network. `--port` moves it, `RECONKG_PORT` sets a default.
+
+**Authentication.** Every route needs `Authorization: Bearer <token>`, from
+`RECONKG_TOKENS` in the form `name:role:token` (roles: `viewer`, `scanner`,
+`operator`, `admin`; tokens at least 16 characters). If it is unset, `app`
+mints one for that process only and prints it at startup — not written to
+disk, different every restart.
+
+A browser cannot attach a header to a plain navigation, so opening `/ui`
+directly will 401. Use a header-injecting extension, or drive the API:
+
+```bash
+export RECONKG_TOKENS="me:admin:$(openssl rand -hex 16)"
+curl -H "Authorization: Bearer ${RECONKG_TOKENS##*:}" \
+     http://127.0.0.1:8765/api/corpus
 ```
 
 The UI shows the knowledge graph with provenance on click, so you can see
