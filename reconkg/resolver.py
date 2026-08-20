@@ -190,12 +190,16 @@ FEED_ROLE = {
 
 
 def _feed_ages(db) -> str:
-    """Per-feed provenance, with the stale one named.
+    """Per-feed provenance, with the stale and the absent ones named.
 
     Named, not counted. "1 feed is stale" makes the analyst open a database
     to find out which, and the answer changes what they should distrust: a
     stale KEV under-reports active exploitation, a stale EPSS mis-ranks
     everything.
+
+    Age is the second question. The first is whether the feed landed at all,
+    because a feed that contributed nothing is not merely old -- it is
+    absent, and its date is the least trustworthy thing about it.
     """
     try:
         feeds = list(db.feeds())
@@ -207,8 +211,22 @@ def _feed_ages(db) -> str:
 
     fresh: list[str] = []
     stale: list[str] = []
+    absent: list[str] = []
     unknown: list[str] = []
     for feed in feeds:
+        # Emptiness is checked before age and independently of it. A feed
+        # holding no records did not land, and dating it then reports the
+        # opposite of the truth: `builddb.record_provenance` dates an NVD
+        # directory containing no page files from the directory itself, so a
+        # pull that failed on its first request is stamped with the moment
+        # `fetch_nvd` created the directory it never wrote into -- and sorts
+        # as the *freshest* feed present. RC-43 said this for the corpus
+        # total and left the per-feed line beside it still claiming health.
+        if feed.record_count == 0:
+            role = FEED_ROLE.get(feed.name, "data")
+            absent.append(f"{feed.name} contributed 0 records ({role} are "
+                          f"missing entirely, not merely out of date)")
+            continue
         age = feed.age_days
         if age is None:
             unknown.append(feed.name)
@@ -228,6 +246,16 @@ def _feed_ages(db) -> str:
     if unknown:
         parts.append("fetch date unreadable for " + ", ".join(unknown))
     text = "; ".join(parts)
+    if absent:
+        # Carries the STALE token deliberately rather than inventing a second
+        # one. A feed holding nothing is strictly worse than a feed holding
+        # old data, and STALE is the word the UI badge and the ledger header
+        # key off; a new token would leave the badge green for the worse of
+        # the two conditions -- which is how this was missed the first time.
+        text = (f"{text}; " if text else "") + "STALE -- EMPTY feeds: " + \
+               "; ".join(absent) + \
+               ". These did not land. Re-run `python -m reconkg.fetch " \
+               "--all`, check that it exits 0, then rebuild."
     if stale:
         # STALE is the token the UI and the ledger header key off, and it has
         # to appear whenever *any* part of the corpus is stale -- otherwise

@@ -934,6 +934,69 @@ def test_a_corpus_with_no_provenance_says_so_rather_than_claiming_freshness(
 
 
 # --------------------------------------------------------------------------- #
+# A feed that did not land at all
+#
+# RC-43 made an empty *corpus* say so. The per-feed line beside it went on
+# reporting the feed that failed as the newest one present, because
+# `_feed_ages` asked how old each feed was and never whether it held
+# anything. On the Kali install that prompted this, the corpus panel read
+# "EMPTY corpus ... 0 CVEs" and "feeds: kev 0d, epss 0d, exploitdb 0d,
+# nvd 0d" in the same sentence -- the second half contradicting the first.
+# --------------------------------------------------------------------------- #
+
+def _empty_feed(db_path, name):
+    """One feed row exactly as a failed fetch leaves it: dated now, empty."""
+    when = datetime.now(timezone.utc).isoformat()
+    with VulnDB(db_path) as db:
+        db.record_feed(name, url="http://x", sha256="", bytes_=0,
+                       record_count=0, fetched_at=when)
+
+
+def test_a_feed_that_landed_nothing_is_not_reported_as_fresh(provenanced):
+    """Zero records is a failure, not a small number, at any timestamp."""
+    _, db_path, _ = provenanced
+    _empty_feed(db_path, "kev")
+
+    resolver = DbResolver(VulnDB(db_path))
+    text = resolver.describe()
+    resolver.close()
+
+    assert "STALE" in text, "an empty feed left the corpus reading healthy"
+    named = text.split("EMPTY feeds:", 1)
+    assert len(named) == 2, "the empty feed was not named as empty"
+    assert "kev" in named[1], "the empty feed was counted, not named"
+    assert "0 records" in named[1], "did not say what was wrong with it"
+    assert "kev 0d" not in text, (
+        "a feed holding nothing was listed among the fresh ones")
+
+
+def test_a_failed_nvd_pull_is_not_the_freshest_feed_in_the_list(wired,
+                                                                tmp_path):
+    """The end-to-end reproduction of the Kali symptom.
+
+    `fetch_nvd` creates its page directory before issuing the first request,
+    so a pull that fails immediately leaves an empty `nvd/` behind. The build
+    then ingests nothing, and `record_provenance` dates the feed from that
+    empty directory -- i.e. from the moment the failure created it.
+    """
+    feeds = tmp_path / "feeds"
+    (feeds / "nvd").mkdir(parents=True)          # created, never written into
+    fetchmod.fetch_kev(feeds)
+
+    build(feeds, tmp_path / "vuln.db")
+    resolver = DbResolver(VulnDB(tmp_path / "vuln.db"))
+    text = resolver.describe()
+    resolver.close()
+
+    assert "EMPTY corpus" in text, "RC-43's own regression"
+    assert "nvd 0d" not in text, (
+        "the feed that failed was reported as the freshest one present")
+    named = text.split("EMPTY feeds:", 1)
+    assert len(named) == 2 and "nvd" in named[1]
+    assert "kev" in text, "the feed that did land should still be reported"
+
+
+# --------------------------------------------------------------------------- #
 # The CLI, which is what an operator actually runs
 # --------------------------------------------------------------------------- #
 

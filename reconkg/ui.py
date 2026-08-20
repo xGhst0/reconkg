@@ -950,6 +950,14 @@ function corpusItem(entry) {
     flags.appendChild(el("span", "badge fixture",
       "demonstration fixture -- not a vulnerability database"));
   }
+  if (entry.empty) {
+    // `/api/corpus` has computed this flag since RC-43 and the page dropped
+    // it on the floor, so a corpus holding zero CVEs carried no badge at all
+    // -- the one state this panel exists to make unmissable. Red, and ahead
+    // of STALE: an empty corpus is not old data, it is no data.
+    flags.appendChild(el("span", "badge stale",
+      "EMPTY -- every lookup will say 'no leads'"));
+  }
   if (entry.stale) { flags.appendChild(el("span", "badge stale", "STALE")); }
   box.appendChild(flags);
   // describe() verbatim. The server wrote these sentences; the page does not

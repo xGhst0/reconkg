@@ -299,6 +299,36 @@ def test_the_stale_token_survives_verbatim(client, monkeypatch):
     assert body["demonstration_fixture"] is False
 
 
+def test_an_empty_corpus_is_badged_and_not_merely_described(client,
+                                                            monkeypatch):
+    """`/api/corpus` has computed `empty` since RC-43; the page dropped it.
+
+    A corpus holding zero CVEs answers "no leads" to every question with
+    total confidence. That is the one state this panel exists to make
+    unmissable, and it was the one state carrying no badge at all -- the
+    flag was computed server-side and never read.
+    """
+    from reconkg import app as app_module
+
+    class _EmptyResolver:
+        def candidates(self, fp):
+            return []
+
+        def describe(self):
+            return ("EMPTY corpus at /tmp/x.sqlite: 0 CVEs. The build "
+                    "produced nothing, so every lookup will report 'no "
+                    "leads' regardless of the host.")
+
+    monkeypatch.setattr(app_module.state.engine, "resolver", _EmptyResolver())
+    body = client.get("/api/corpus", headers=VIEWER).json()
+    assert body["empty"] is True
+    assert body["demonstration_fixture"] is False
+
+    page = client.get("/ui", headers=VIEWER).text
+    assert "entry.empty" in page, (
+        "the page never reads the flag, so the badge can never render")
+
+
 # --------------------------------------------------------------------------- #
 # The category gate, through the HTTP layer the tickboxes actually use
 # --------------------------------------------------------------------------- #
