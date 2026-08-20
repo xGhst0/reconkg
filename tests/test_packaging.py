@@ -318,3 +318,87 @@ def test_package_discovery_excludes_tests_and_audit():
     assert "reconkg*" in find["include"]
     assert "tests*" in find["exclude"]
     assert "audit*" in find["exclude"]
+
+
+# --------------------------------------------------------------------------
+# One execution chokepoint  (BRIEF non-negotiable 9)
+# --------------------------------------------------------------------------
+
+EXEC_OWNER = "runner.py"
+
+_EXEC_ATTRS = {
+    "create_subprocess_exec", "create_subprocess_shell",
+    "system", "popen", "execv", "execve", "execvp", "execvpe",
+    "spawnv", "spawnve", "spawnl", "fork", "forkpty",
+}
+
+
+def execution_sites(path: Path) -> set[str]:
+    """Every way this file could start a process.
+
+    AST rather than a text scan: `commands.py` discusses `subprocess.run` in
+    a docstring -- it is explaining what a hostile nuclei template does -- and
+    a rule that fires on prose is a rule people learn to suppress.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] in {"subprocess", "pty"}:
+                    found.add(f"import {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            if (node.module or "").split(".")[0] in {"subprocess", "pty"}:
+                found.add(f"from {node.module} import ...")
+        elif isinstance(node, ast.Call):
+            if (isinstance(node.func, ast.Attribute)
+                    and node.func.attr in _EXEC_ATTRS):
+                found.add(f"{node.func.attr}()")
+            for keyword in node.keywords:
+                if (keyword.arg == "shell"
+                        and isinstance(keyword.value, ast.Constant)
+                        and keyword.value.value is True):
+                    found.add("shell=True")
+    return found
+
+
+def test_only_the_runner_may_execute_anything():
+    """BRIEF non-negotiable 9, asserted rather than merely requested.
+
+    A rule written in a document and checked by nothing is the RC-22 shape
+    exactly: `defusedxml` was relied on, declared nowhere, and the fallback
+    ran for months with the suite green. Now that reconkg executes a scanner,
+    the equivalent gap is a second module quietly acquiring a `subprocess`
+    call -- so the chokepoint is a test rather than a convention, and it
+    fails by name.
+    """
+    offenders = {}
+    for path in python_sources(PACKAGE_DIR):
+        if path.name == EXEC_OWNER:
+            continue
+        sites = execution_sites(path)
+        if sites:
+            offenders[path.name] = sorted(sites)
+
+    assert not offenders, (
+        f"only reconkg/{EXEC_OWNER} may execute commands (BRIEF "
+        f"non-negotiable 9); found {offenders}")
+
+
+def test_the_runner_never_uses_a_shell():
+    """One chokepoint is worth nothing if it accepts a command line.
+
+    RC-32: msfconsole re-split its own `-x` argument on `;`, and quoting it
+    *correctly* was precisely what delivered the payload intact as a single
+    argument. `create_subprocess_shell` would reintroduce that entire class
+    here, where the argument is an address an authenticated caller supplied.
+    """
+    sites = execution_sites(PACKAGE_DIR / EXEC_OWNER)
+
+    assert "create_subprocess_exec()" in sites, (
+        "the runner should execute via create_subprocess_exec")
+    assert "create_subprocess_shell()" not in sites
+    assert "shell=True" not in sites
+    assert not any(s.startswith("import subprocess") for s in sites), (
+        "asyncio's subprocess API is enough here; importing subprocess "
+        "invites a blocking call into an async server")
