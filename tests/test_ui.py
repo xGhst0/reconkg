@@ -504,6 +504,26 @@ MARKUP_SINKS = ["innerHTML", "outerHTML", "insertAdjacentHTML",
                 "document.write", "eval(", "new Function", "srcdoc"]
 
 
+def test_the_import_guard_covers_every_sink_this_suite_does():
+    """The two lists are one control, and they had already drifted.
+
+    `reconkg/ui.py` raises at import if the page contains any of these, and
+    this module asserts the same thing against the served bytes. `srcdoc` was
+    added here and not there, so the import guard passed a sink the test
+    would have failed on -- a control on one path, missing from the second,
+    inside the mechanism written to prevent exactly that.
+
+    Kept as two lists on purpose: this one is the specification and ui.py's
+    is the implementation, so a deletion from either fails here. Importing
+    one into the other would let a quiet removal move both at once.
+    """
+    from reconkg import ui
+
+    assert set(ui.MARKUP_SINKS) == set(MARKUP_SINKS), (
+        "reconkg/ui.py's import-time guard and this suite disagree about "
+        "what a markup sink is; add to both or neither")
+
+
 @pytest.mark.parametrize("sink", MARKUP_SINKS)
 def test_the_served_page_never_assigns_markup(client, sink):
     """Asserted against the bytes the route serves, not the source file.

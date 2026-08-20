@@ -134,6 +134,10 @@ _TEMPLATE = r"""
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .dim { color: var(--dim); }
   .mono-pre { white-space: pre-wrap; word-break: break-word; margin: 0; font: inherit; }
+  /* The command a scan actually ran. Collapsed until there is one, so an
+     empty transcript does not reserve a gap under the status line. */
+  #nmap-command:empty { display: none; }
+  #nmap-command { margin-top: 6px; font-size: 12px; }
   .badge {
     display: inline-block; padding: 0 6px; border-radius: 3px;
     border: 1px solid var(--line); font-size: 11px; margin-left: 6px;
@@ -220,7 +224,24 @@ _TEMPLATE = r"""
       <button id="scan">scan</button>
       <button id="refresh">refresh</button>
     </div>
+    <!-- Reconnaissance reconkg runs itself. Deliberately a separate row from
+         the one above: those controls read and correlate what is already in
+         the graph, these two put packets on the wire. -->
+    <div class="row">
+      <label for="profile" class="dim">profile</label>
+      <select id="profile" disabled>
+        <option>(probed on authentication)</option>
+      </select>
+      <button id="nmap" disabled>run nmap</button>
+    </div>
+    <div class="row">
+      <input type="file" id="scanfile"
+             accept=".xml,text/xml,application/xml">
+      <button id="import">import XML</button>
+    </div>
     <p class="dim" id="scan-status">idle</p>
+    <!-- The command a scan ran, verbatim. See showScanCommand(). -->
+    <pre class="mono-pre dim" id="nmap-command"></pre>
     <h3>Live events <span class="dim" id="ws-state">(ws: closed)</span></h3>
     <div class="log" id="events"></div>
   </section>
@@ -430,6 +451,215 @@ async function selectTarget() {
   await loadGraph();
   await loadLedger();
   renderCommands(null);
+}
+
+// ---------------------------------------------------------------------- //
+// 1b. Scans reconkg runs itself, and XML from scans it did not.
+//
+// Two routes into the same place -- evidence staged against a target --
+// which fail in entirely different ways, so each names itself in the status
+// line rather than sharing one generic "failed".
+//
+// The scanner is probed once, on authentication. When it is missing the
+// controls are disabled with the reason on screen and NOT hidden: an
+// operator who cannot see the control cannot tell whether the feature is
+// absent or whether nmap is, and those have different fixes.
+// ---------------------------------------------------------------------- //
+
+// The detail from the API is the authority; these only add the next action,
+// which a status code does not carry. 404 most of all -- "not found" for an
+// address the operator just typed reads like a bug rather than like
+// "register it first".
+const ROUTE_HINTS = {
+  "403": "an address in that file is outside the scope on your credential",
+  "404": "press 'add target' first; an address is registered and scope-" +
+         "checked before reconkg sends it a single packet",
+  "409": "nmap is not installed on the coordinator -- import XML from a " +
+         "scan you ran elsewhere instead",
+  "413": "that file is larger than the import route accepts",
+  "422": "that file is not usable nmap XML",
+  "429": "rate limited; the per-principal bucket refills, so wait and retry",
+  "504": "the scan hit its wall-clock ceiling and was stopped -- 'quick' " +
+         "finishes in minutes where 'thorough' may not finish at all"
+};
+
+function withHint(message) {
+  const text = String(message);
+  const hint = ROUTE_HINTS[text.split(" ")[0]];
+  return hint ? text + " -- " + hint : text;
+}
+
+// Every warning, not a count of them. note() replaces the status line, so
+// the loop leaves the last warning standing there and the log below keeps
+// all of them -- which is why each one goes to both. These are the lines
+// that say an address was rejected or a file was truncated: the difference
+// between a clean host and an unread one.
+function reportWarnings(warnings) {
+  const list = warnings || [];
+  list.forEach(function (warning) {
+    logEvent(warning, "err");
+    note(warning, "err");
+  });
+  return list.length;
+}
+
+// What actually ran. An operator reading "0 services" has to be able to see
+// whether -sV was in the command at all; the profile name alone does not
+// answer that, and a run that fell back to a different profile would look
+// identical without this.
+//
+// This is a transcript of a process that has already exited, not a line
+// offered for pasting, so it gets no copy button -- the same reason the
+// never-composed tier gets none.
+//
+// One element per line, never parts.join(" "). Every element here does come
+// from a fixed profile table, a resolved binary path, an mkstemp path and
+// one validated address, so joining them would be safe in fact -- but the
+// page is the wrong place to hold that exception, and the rule in this
+// module's docstring is stated without one. RC-32's lesson is that a
+// command line re-splits under a shell differently from how execve saw it,
+// and a list answers "was -sV in there" exactly as well as a sentence does
+// while being unmistakably not a thing to paste.
+function showScanCommand(parts) {
+  const box = clear($("nmap-command"));
+  if (!parts || !parts.length) { return; }
+  parts.forEach(function (part) {
+    box.appendChild(el("div", null, part));
+  });
+}
+
+let scannerReady = false;
+
+async function probeScanner() {
+  const select = clear($("profile"));
+  const button = $("nmap");
+  scannerReady = false;
+  select.disabled = true;
+  button.disabled = true;
+
+  let scanner;
+  try {
+    scanner = await api("/api/scanner");
+  } catch (err) {
+    // "not probed" is a third state and must not read as "not installed":
+    // one of those is fixed with apt, the other with a credential.
+    select.appendChild(el("option", null, "(scanner not probed)"));
+    note("scanner probe failed: " + withHint(err.message), "err");
+    return;
+  }
+
+  (scanner.profiles || []).forEach(function (name) {
+    const option = el("option", null, name);
+    option.value = name;
+    if (name === scanner.default_profile) { option.selected = true; }
+    select.appendChild(option);
+  });
+  if (!select.childElementCount) {
+    select.appendChild(el("option", null, "(no profiles offered)"));
+  }
+
+  if (!scanner.available) {
+    note("nmap unavailable: " +
+         (scanner.reason || "not installed or not on PATH") +
+         ". The profiles are listed but the button stays disabled; " +
+         "importing XML from a scan you ran elsewhere still works.", "err");
+    return;
+  }
+  select.disabled = false;
+  button.disabled = false;
+  scannerReady = true;
+  note("nmap ready at " + (scanner.path || "an unnamed path") + "; " +
+       select.childElementCount + " profile(s)");
+}
+
+async function runNmap() {
+  // state.target, not the input box: it is the address the graph below is
+  // showing, and scanning something other than what is on screen is the
+  // mismatch that ends with packets at a host nobody meant to touch.
+  if (!state.target) { note("set a target first", "err"); return; }
+  const profile = $("profile").value;
+  const button = $("nmap");
+  button.disabled = true;
+  clear($("nmap-command"));
+  note("nmap " + profile + " against " + state.target +
+       " -- minutes, not seconds; 'service' is allowed up to half an hour");
+  try {
+    const run = await api(
+      "/api/targets/" + encodeURIComponent(state.target) + "/nmap", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({profile: profile})
+      });
+    showScanCommand(run.command);
+    // timed_out folded into the summary rather than dropped: the route
+    // answers 504 when it stops a scan, but a 201 carrying partial results
+    // reported as plain success would be a lie about coverage.
+    const summary = "nmap " + run.profile +
+                    (run.timed_out ? " TIMED OUT after " : " finished in ") +
+                    run.duration_s + "s: " + run.hosts + " host(s), " +
+                    run.services + " service(s), " +
+                    (run.staged || []).length + " target(s) staged";
+    logEvent(summary, run.timed_out ? "err" : "ok");
+    note(summary, run.timed_out ? "err" : "ok");
+    reportWarnings(run.warnings);
+    await loadGraph();
+    await loadLedger();
+  } catch (err) {
+    note(withHint(err.message), "err");
+  } finally {
+    // A scan that failed still has to give the button back. Restored to
+    // what the probe found, not unconditionally enabled.
+    button.disabled = !scannerReady;
+  }
+}
+
+async function importXml() {
+  const file = ($("scanfile").files || [])[0];
+  if (!file) { note("choose an nmap XML file first", "err"); return; }
+  const button = $("import");
+  button.disabled = true;
+  note("importing " + file.name + " ...");
+  try {
+    // The raw document, not a multipart form: the route takes one XML body,
+    // and the page's CSP sets form-action 'none' in any case.
+    const text = await file.text();
+    const result = await api("/api/import", {
+      method: "POST",
+      headers: {"Content-Type": "application/xml"},
+      body: text
+    });
+    // The route reports hosts as a list of addresses; ImportResult holds
+    // them as a mapping, so accept either rather than render "undefined
+    // host(s)" if the two ever drift apart.
+    const hosts = Array.isArray(result.hosts)
+                  ? result.hosts : Object.keys(result.hosts || {});
+    const summary = (result.source || "import") + ": " + hosts.length +
+                    " host(s), " + result.ports + " port(s), " +
+                    result.services + " service(s)";
+    logEvent(summary, "ok");
+    note(summary, "ok");
+    const discovered = result.discovered_only || [];
+    if (discovered.length) {
+      // Up, but carrying no port data -- a host-discovery sweep. Named,
+      // because "this address is live" is real evidence and reads as an
+      // empty import otherwise.
+      logEvent(discovered.length + " host(s) up with no port data: " +
+               discovered.join(", "), "dim");
+    }
+    reportWarnings(result.warnings);
+    if (!$("target").value.trim() && hosts.length) {
+      // Otherwise a successful import draws nothing at all: every panel
+      // below renders the selected target, and there is no selected target.
+      $("target").value = hosts[0];
+      await selectTarget();
+    } else {
+      await loadGraph();
+    }
+  } catch (err) {
+    note(withHint(err.message), "err");
+  } finally {
+    button.disabled = false;
+  }
 }
 
 // ---------------------------------------------------------------------- //
@@ -996,6 +1226,11 @@ async function useToken() {
     return;
   }
   await loadCorpus();
+  // Alongside loadCorpus() and for the same reason: both are capability
+  // probes that need a credential, and both answer "is this question even
+  // being asked here". Probing before the token is set would 401 and put a
+  // failure on screen that says nothing about whether nmap is installed.
+  await probeScanner();
   await openSocket();
 }
 
@@ -1004,6 +1239,8 @@ $("add").addEventListener("click", addTarget);
 $("scan").addEventListener("click", runScan);
 $("refresh").addEventListener("click", selectTarget);
 $("target").addEventListener("change", selectTarget);
+$("nmap").addEventListener("click", runNmap);
+$("import").addEventListener("click", importXml);
 
 renderCategories();
 renderCommands(null);
@@ -1021,8 +1258,17 @@ PAGE = _TEMPLATE.replace("__CONSTANTS__", _CONSTANTS)
 # asserts the same thing against the bytes the route actually serves; doing it
 # here as well means a stray `innerHTML` in an edit fails at import, before a
 # test run, and names the reason.
-for _forbidden in ("innerHTML", "outerHTML", "insertAdjacentHTML",
-                   "document.write", "eval(", "new Function"):
+#
+# This list and `MARKUP_SINKS` in tests/test_ui.py were the same control on
+# two paths, and they drifted exactly as the standing question predicts:
+# `srcdoc` was added to the test and not here, leaving the import-time guard
+# passing a sink the test fails on. Asking the next editor to update both
+# would be the same request that already failed once, so the list is exported
+# instead and a test asserts the two agree.
+MARKUP_SINKS = ("innerHTML", "outerHTML", "insertAdjacentHTML",
+                "document.write", "eval(", "new Function", "srcdoc")
+
+for _forbidden in MARKUP_SINKS:
     if _forbidden in PAGE:                              # pragma: no cover
         raise AssertionError(
             f"reconkg/ui.py contains {_forbidden!r}. This page renders "
