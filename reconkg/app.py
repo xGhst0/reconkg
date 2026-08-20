@@ -485,6 +485,15 @@ async def corpus_status(
     return {"describe": first["describe"],
             "resolver": first["resolver"],
             "demonstration_fixture": first["demonstration_fixture"],
+            # `empty` belongs beside `stale`, not only inside `corpora`.
+            # RC-43 added the flag to `_corpus_entry` and stopped there, so a
+            # client reading the top-level summary -- the keys this docstring
+            # calls the ones clients read -- could learn the corpus was stale
+            # or a demonstration fixture but not that it held nothing at all.
+            # That is the most severe of the three states and it was the one
+            # missing: the same control-on-one-path shape the audit keeps
+            # finding, this time inside a single return statement.
+            "empty": first["empty"],
             "stale": first["stale"],
             "corpora": corpora}
 

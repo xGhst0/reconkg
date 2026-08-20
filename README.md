@@ -115,11 +115,35 @@ unclassified and sits behind the opt-in.
 
 ## Development
 
+Kali is PEP 668 externally-managed, so install into a virtualenv rather than
+over the system interpreter. Kali's own Python tooling is built against the
+packaged pytest and pydantic, and upgrading those underneath it is not a
+trade worth making for a test run.
+
 ```bash
-pip install -r requirements-dev.txt
-python -m pytest tests/ -q          # 1219 tests
-python -m audit.mutation            # mutation testing, 12 targets at 100%
-python -m audit.scale_bench         # corpus scale benchmark
+python3 -m venv .venv && source .venv/bin/activate
+make install     # editable install with dev extras
+make test        # full pytest suite
+make check       # test + the mutation harness
+```
+
+`make install` is `pip install -e ".[dev]"`. The dev extra is not optional
+decoration — `pytest-asyncio` drives most of this suite, and a run without it
+reports every async test as broken code rather than as a missing plugin.
+`required_plugins` in `pyproject.toml` now stops the run with one line
+instead of failing seventy-odd tests that are fine.
+
+To install over the system interpreter anyway, the Makefile has the hook:
+
+```bash
+make install PIP_FLAGS=--break-system-packages
+```
+
+The benchmarks are scripts, not modules — there is no `audit/__init__.py`:
+
+```bash
+python audit/mutation.py            # mutation testing
+python audit/scale_bench.py         # corpus scale benchmark
 ```
 
 `docs/` carries the design notes and the reasoning behind the decisions

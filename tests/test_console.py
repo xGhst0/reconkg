@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from reconkg.builtin_modules import BUILTIN_MODULES
+from reconkg.catalog import ExploitCatalog
 from reconkg.console import (COMMANDS, MAX_WORKSPACES, Console, Workspace,
                              _split_commands)
 from reconkg.modules import (ModuleInfo, ModuleRegistry, Option, OptType,
@@ -77,6 +78,54 @@ class LootModule(ReconModule):
         raise AssertionError("the console must never run a non-recon module")
 
 
+_REAL_AUTOLOAD = ExploitCatalog.autoload
+"""Captured before the isolation fixture rebinds the attribute, so the
+fixture can still run the real loader -- against paths that do not exist."""
+
+
+@pytest.fixture(autouse=True)
+def no_host_exploit_indexes(tmp_path):
+    """Point catalogue autoload at a directory that does not exist.
+
+    `Console()` autoloads by default, and `DEFAULT_EDB_PATHS` /
+    `DEFAULT_MSF_PATHS` name the exact files Kali ships. On the box this
+    console is written for, every console here therefore started with
+    46,968 Exploit-DB rows and 6,160 Metasploit entries already loaded, and
+    `catalog` reported an index where this file asserts an empty one. Green
+    in CI, red on a real host, is the least useful failure a suite has: the
+    test was reading the machine instead of controlling it.
+
+    Patched on `ExploitCatalog` rather than passing `autoload_catalog=False`
+    to each console: `autoload`'s path tuples are default arguments bound at
+    def time, so rebinding the module constants isolates nothing, and an
+    autouse fixture also covers the consoles built inside a test body rather
+    than through the `console` fixture -- the second path, which is where
+    this project keeps losing controls.
+
+    The real loader still runs; only the paths change. The branch exercised
+    is "not installed", which is what a machine without searchsploit reports
+    and what every assertion in this file has always assumed.
+
+    Its own `MonkeyPatch`, not the `monkeypatch` fixture: a test below calls
+    `monkeypatch.undo()` mid-test, and undo() is all-or-nothing on the
+    instance it is called on. Sharing one would let a test silently hand the
+    host's indexes back to any console it built afterwards.
+    """
+    absent = tmp_path / "no-such-index-dir"
+
+    def autoload_from_nowhere(self, *args, **kwargs):
+        # Caller-supplied paths are ignored rather than forwarded: nothing
+        # here passes any, and honouring them would reopen the hole.
+        return _REAL_AUTOLOAD(
+            self,
+            edb_paths=(str(absent / "files_exploits.csv"),),
+            msf_paths=(str(absent / "modules_metadata_base.json"),))
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ExploitCatalog, "autoload", autoload_from_nowhere)
+        yield
+
+
 @pytest.fixture()
 def registry() -> ModuleRegistry:
     reg = ModuleRegistry()
@@ -88,7 +137,10 @@ def registry() -> ModuleRegistry:
 
 
 @pytest.fixture()
-def console(registry):
+def console(registry, no_host_exploit_indexes):
+    # The isolation fixture is autouse, so this argument changes nothing at
+    # runtime; it is here so the ordering is a declared dependency rather
+    # than an assumption about how pytest sequences autouse fixtures.
     con = Console(registry=registry)
     yield con
     con.close()
@@ -475,6 +527,12 @@ def test_handoff_without_arguments(console):
 # --------------------------------------------------------------------------- #
 
 def test_catalog_empty_explains_what_it_would_do(console):
+    # The precondition is pinned, not implied. When a host index leaked in,
+    # the only symptom was a string mismatch two lines further down, which
+    # names the assertion and not the cause.
+    assert console.catalog_report == {"exploit-db": "not installed",
+                                      "metasploit": "not installed"}
+    assert len(console.catalog) == 0
     out = console.execute("catalog")
     assert "[*] Exploit index: empty." in out
     assert "The index is metadata. Loading it runs nothing." in out

@@ -78,3 +78,12 @@ exclude = ["tests*", "audit*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+#  `asyncio_mode` above is pytest-asyncio's option, not pytest's. With the
+#  plugin absent pytest downgrades it to a PytestConfigWarning nobody reads,
+#  then reports every async test as "async def functions are not natively
+#  supported" -- 74 failures and 16 collection errors on a fresh Kali
+#  checkout, every one of which looks like broken code and none of which is.
+#  `required_plugins` aborts the run instead, with one line naming what to
+#  install. Same class as RC-22: a declaration nothing checks against what
+#  actually loaded.
+required_plugins = ["pytest-asyncio>=1.4.0"]

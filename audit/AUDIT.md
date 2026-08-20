@@ -766,3 +766,80 @@ has now caused two findings (RC-31, PROP-04); it should probably stop
 subclassing `str`, which would turn both into type errors at construction.
 
 Next round should start there rather than with a new feature.
+
+---
+
+# Round 11 — the corpus that reported itself healthy while holding nothing
+
+Found on a real Kali install rather than by reading code, which is worth
+saying first: the panel this project built specifically to prevent a silent
+empty corpus displayed a silent empty corpus and put the word `0d` next to
+it. Everything below follows from one operator asking why a scan returned no
+leads.
+
+Note on numbering: **RC-42 and RC-43 exist in the code and in
+`tests/test_rc41.py` but were never written into this file.** RC-42 was a
+`LIMIT 500` truncation that kept the wrong candidate rows; RC-43 made an
+empty corpus say "EMPTY corpus" instead of reporting itself healthy. The
+ledger being two findings behind the code undercuts the counted table above,
+and is itself the shape this file keeps documenting.
+
+| ID | Sev | Location | Flaw | Status |
+|----|-----|----------|------|--------|
+| RC-44 | **High** | `resolver._feed_ages` | Freshness was judged on timestamp alone; `record_count` was available on every `FeedSource` and never read. `fetch_nvd` creates its page directory *before* the first request, so a pull that fails immediately leaves an empty `nvd/`; `builddb.record_provenance` then dates that feed from the directory's own mtime. The feed that did not land was therefore stamped with the moment it failed and sorted as the **freshest feed present**. The panel read `EMPTY corpus ... 0 CVEs` and `feeds: kev 0d, epss 0d, exploitdb 0d, nvd 0d` in one sentence. | Fixed |
+| RC-45 | **Medium** | `app.corpus_status` | RC-43 added `empty` to `_corpus_entry` and stopped. The top-level summary — the keys the route's own docstring calls "what clients read" — carried `demonstration_fixture` and `stale` but not `empty`, so the most severe of the three states was the one a client could not see. `ui.corpusItem` compounded it: the flag was computed server-side and the page never read it, so an empty corpus was the only state in the panel with no badge. | Fixed |
+| RC-46 | **Medium** | `tests/test_console.py`, `catalog.ExploitCatalog.autoload` | The suite read the host instead of controlling it. `Console()` autoloads by default and `DEFAULT_EDB_PATHS`/`DEFAULT_MSF_PATHS` name the exact files Kali ships, so every console in the file started with 46,968 Exploit-DB rows and 6,160 Metasploit entries loaded. Green on a clean CI runner, red on the machine the tool is written for. | Fixed in tests |
+| RC-47 | **Medium** | `pyproject.toml` | `asyncio_mode = "auto"` is pytest-asyncio's option. Without the plugin, pytest downgraded it to a warning and reported 74 async tests as `async def functions are not natively supported` plus 16 collection errors — a suite that looked comprehensively broken because one package was absent. `required_plugins` was never set. A verification harness that misreports its own environment is the same failure as a corpus that misreports its own emptiness. | Fixed |
+
+## Root cause
+
+RC-44 and RC-45 are one bug at two altitudes: **the signal existed and the
+layer above it did not read it.** `record_count` was stored correctly and
+`_feed_ages` ignored it; `empty` was computed correctly and both the summary
+and the page ignored it. Neither needed new information — both needed the
+consumer to use what was already there.
+
+That is a variant worth naming, because it is not the usual shape. The usual
+one is a control implemented on one path and forgotten on a second. This is a
+control implemented *completely* and then not consumed — which is harder to
+spot, because the code that computes the flag reads as finished and the test
+that covers it passes.
+
+RC-46 is the standing shape in the test suite rather than the product: an
+assertion that depends on the machine is a control that only holds on the
+machines nobody runs. It passed in CI for every round in this file.
+
+## Where the second path is, for each control added this round
+
+| Control added | The route that skips it |
+|---|---|
+| `record_count == 0` flags an absent feed | none in `_feed_ages` — it is shared by all three resolvers, so the check is at a chokepoint |
+| honest per-feed reporting | `record_feed` still turns a falsy `fetched_at` into "now", in **three separate copies** (`vulndb`, `exploitdb`, `scriptdb`), so `FeedSource.age_days` still reports a feed that never landed as zero days old to any consumer not going through `_feed_ages` |
+| `empty` in the corpus summary | none found — the flag is now on the entry, the summary and the page |
+| host-index isolation in tests | **`app.py:129` `state = AppState()` autoloads at import time.** Eight test files rebuild `AppState()`, and a fixture cannot neutralise a load that happened during collection. `tests/test_integration.py:329` (`maturity_source == "declared"`) passes today only because Kali's index does not currently carry CVE-2023-25690 |
+
+## Still open
+
+1. **`record_feed`'s fabricated timestamp**, three copies. Making `""` mean
+   "unknown" rather than "now" is the honest fix and closes RC-44's second
+   path at the store rather than at the reporter.
+2. **Import-time catalogue autoload.** There is no `tests/conftest.py` at
+   all. A session-wide neutralisation of `ExploitCatalog.autoload` would be
+   one control on every route instead of the per-file patch RC-46 added — but
+   it cannot cover `app.py:129`, so the real fix is removing the module-level
+   `AppState()` or giving it the `autoload_catalog` switch the console
+   already has.
+3. **CI does not run the interpreter the operator does.** The matrix is
+   3.10–3.12; Kali ships 3.13, and `requires-python` claims `>=3.10` with no
+   upper bound.
+4. **Docs drift.** README claimed 1219 tests against an actual 1178, and "12
+   targets" against the 7 in `MUT_MODULES`. Both corrected. The counts in
+   `BRIEF.md` (363) remain wrong.
+
+## Not verified
+
+Every fix in this round was written on a machine with no Python interpreter
+and verified on the Kali box afterwards. RC-44 is confirmed by a real run —
+its two regressions passed and nothing existing broke. RC-45, RC-46 and RC-47
+are reasoned from source and need a clean `make check` before this round can
+claim what the rounds above claim.

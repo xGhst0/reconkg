@@ -321,7 +321,13 @@ def test_an_empty_corpus_is_badged_and_not_merely_described(client,
 
     monkeypatch.setattr(app_module.state.engine, "resolver", _EmptyResolver())
     body = client.get("/api/corpus", headers=VIEWER).json()
-    assert body["empty"] is True
+
+    # Both paths, because the flag was computed for the `corpora` entries and
+    # left out of the top-level summary. A client reading the summary -- as
+    # the tests beside this one do for `stale` -- could see that the corpus
+    # was stale or a fixture, and not that it held nothing.
+    assert body["empty"] is True, "the top-level summary hides an empty corpus"
+    assert body["corpora"][0]["empty"] is True
     assert body["demonstration_fixture"] is False
 
     page = client.get("/ui", headers=VIEWER).text
