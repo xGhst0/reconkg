@@ -699,13 +699,20 @@ def test_cpe_parse_never_raises_and_never_half_builds(raw):
 
 @PROFILE
 @given(cpe_text)
-#  Found by this property on a live run and pinned here, so it is tried every
-#  time instead of waiting for the generator to rediscover it. A
-#  whitespace-only attribute was truthy, so it survived `parse` as a literal
-#  space; `str()` emitted a trailing `: `; and `parse` strips the whole string
-#  before splitting, so it came back as ANY. Same family as PROP-01, where an
-#  escaped colon shifted every later attribute one position.
+#  Two counterexamples this property found on live runs, pinned so they are
+#  tried every time rather than waiting for the generator to rediscover them.
+#  Both are the same defect: `parse` strips the whole string before splitting
+#  it, so trailing whitespace on the LAST attribute was destroyed while the
+#  identical value in any other position survived -- parsing that depended on
+#  position. Same family as PROP-01, where an escaped colon shifted every
+#  later attribute one place.
+#
+#  The second was found immediately after a fix that handled only the first:
+#  an attribute made *of* whitespace is a special case of one merely
+#  *carrying* it, and fixing the special case left the class untouched. Both
+#  are kept precisely because that is the mistake worth failing on again.
 @example(raw="cpe:2.3:a:a:a:a:a:a:a:a:a:a: :a")
+@example(raw="cpe:2.3:a:a:a:a:a:a:a:a:a:a:0 :a")
 def test_cpe_parse_round_trips_through_str(raw):
     """P10. `parse(str(parse(s))) == parse(s)`.
 

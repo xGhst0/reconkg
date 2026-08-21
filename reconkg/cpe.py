@@ -196,12 +196,18 @@ def parse(raw: Optional[str]) -> Optional[CPE]:
 
     fields = {}
     for index, name in enumerate(_ATTRS):
-        value = parts[index] if index < len(parts) else ANY
-        # `value.strip()`, not `value`. An empty attribute already became ANY,
-        # but a whitespace-only one is truthy and survived as a literal space.
-        # `str()` then emitted a trailing `: `, and the strip on line 185
-        # removes it before splitting, so the attribute came back as ANY --
-        # `parse(str(parse(s))) != parse(s)`, found by the property suite.
+        # Each attribute is stripped, and the whole point is that it happens
+        # to EVERY attribute rather than only the last one.
+        #
+        # `raw.strip()` above removes trailing whitespace from the string
+        # before it is split, so the final attribute silently loses it while
+        # the same value in any other position keeps it. Parsing was
+        # position-dependent: `other="0 "` survived `parse`, `str()` emitted a
+        # trailing `0 `, and the re-parse stripped it back to `"0"`.
+        # `parse(str(parse(s))) != parse(s)` -- found by the property suite,
+        # twice, because the first fix here handled only the case where the
+        # value was made *of* whitespace and not the class of values merely
+        # *carrying* it.
         #
         # Not a display bug. `vulndb` stores `str(cpe)` in the `criteria`
         # column and re-parses it on every candidate lookup, so a CPE that
@@ -210,9 +216,12 @@ def parse(raw: Optional[str]) -> Optional[CPE]:
         # that contain one. PROP-01 was this same property failing on an
         # escaped colon.
         #
-        # ANY is the right destination: an attribute made of whitespace
-        # states nothing, and the spec spells "unspecified" as `*`.
-        fields[name] = _unescape(value) if value.strip() else ANY
+        # Stripping here makes the normalisation idempotent, which is what
+        # the property actually demands. ANY is the right destination for
+        # what is left over: an attribute made of whitespace states nothing,
+        # and the spec spells "unspecified" as `*`.
+        value = (parts[index] if index < len(parts) else ANY).strip()
+        fields[name] = _unescape(value) if value else ANY
     return CPE(**fields)
 
 
