@@ -197,7 +197,22 @@ def parse(raw: Optional[str]) -> Optional[CPE]:
     fields = {}
     for index, name in enumerate(_ATTRS):
         value = parts[index] if index < len(parts) else ANY
-        fields[name] = _unescape(value) if value else ANY
+        # `value.strip()`, not `value`. An empty attribute already became ANY,
+        # but a whitespace-only one is truthy and survived as a literal space.
+        # `str()` then emitted a trailing `: `, and the strip on line 185
+        # removes it before splitting, so the attribute came back as ANY --
+        # `parse(str(parse(s))) != parse(s)`, found by the property suite.
+        #
+        # Not a display bug. `vulndb` stores `str(cpe)` in the `criteria`
+        # column and re-parses it on every candidate lookup, so a CPE that
+        # does not survive `str()` is written to the corpus meaning one thing
+        # and read back meaning another -- silently, and only for the rows
+        # that contain one. PROP-01 was this same property failing on an
+        # escaped colon.
+        #
+        # ANY is the right destination: an attribute made of whitespace
+        # states nothing, and the spec spells "unspecified" as `*`.
+        fields[name] = _unescape(value) if value.strip() else ANY
     return CPE(**fields)
 
 

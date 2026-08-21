@@ -49,7 +49,8 @@ import pytest
 
 pytest.importorskip("hypothesis")
 
-from hypothesis import HealthCheck, assume, given, settings, strategies as st
+from hypothesis import (HealthCheck, assume, example, given, settings,
+                        strategies as st)
 
 from reconkg.catalog import ExploitRecord
 from reconkg.commands import (BoundaryViolation, Category, Command,
@@ -698,6 +699,13 @@ def test_cpe_parse_never_raises_and_never_half_builds(raw):
 
 @PROFILE
 @given(cpe_text)
+#  Found by this property on a live run and pinned here, so it is tried every
+#  time instead of waiting for the generator to rediscover it. A
+#  whitespace-only attribute was truthy, so it survived `parse` as a literal
+#  space; `str()` emitted a trailing `: `; and `parse` strips the whole string
+#  before splitting, so it came back as ANY. Same family as PROP-01, where an
+#  escaped colon shifted every later attribute one position.
+@example(raw="cpe:2.3:a:a:a:a:a:a:a:a:a:a: :a")
 def test_cpe_parse_round_trips_through_str(raw):
     """P10. `parse(str(parse(s))) == parse(s)`.
 
