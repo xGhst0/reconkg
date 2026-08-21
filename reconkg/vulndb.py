@@ -94,6 +94,14 @@ CREATE TABLE IF NOT EXISTS applicability (
 CREATE INDEX IF NOT EXISTS applicability_identity
     ON applicability(part, vendor, product, major_lo, major_hi);
 CREATE INDEX IF NOT EXISTS applicability_cve ON applicability(cve_id);
+-- Tier two of `candidates()` and the gate on tier three both look up by
+-- product with the vendor relaxed, and `applicability_identity` cannot serve
+-- that: vendor sits between part and product in its key, so a product-only
+-- predicate degrades to a scan of 2.8 million rows. It would run on the miss
+-- path -- exactly where nobody notices a slow query until a scan takes a
+-- minute and the cause is three layers down.
+CREATE INDEX IF NOT EXISTS applicability_product
+    ON applicability(product, part, major_lo, major_hi);
 
 -- Product-name fallback for fingerprints with no usable CPE. Separate table
 -- because it is a different access pattern -- substring, not equality -- and
@@ -396,14 +404,27 @@ class VulnDB:
 
     # -- retrieval ----------------------------------------------------------- #
 
-    def candidates_for_cpe(self, observed: CPE,
-                           limit: int = 500) -> list[VulnEntry]:
+    def candidates_for_cpe(self, observed: CPE, limit: int = 500, *,
+                           match_vendor: bool = True) -> list[VulnEntry]:
         """CVEs whose applicability shares this CPE identity.
 
         Includes statements whose vendor or product is ANY, because those are
         real in NVD and a strict equality lookup would silently drop them.
         Matching is still `cpe.py`'s decision -- this only narrows.
+
+        `match_vendor=False` drops the vendor predicate and narrows on
+        product and version alone. That is tier two of `candidates()`: nmap
+        and NVD disagree about vendors often enough to matter -- `oracle`
+        versus `mysql`, `f5` versus `nginx` -- and relaxing the vendor is
+        cheap because **the version bounds are untouched**. It cannot produce
+        the failure the substring path can, where a host on 4.0 collects a
+        lead for something fixed in 3.0.
+
+        Parameterised rather than duplicated into a second method: two
+        near-identical queries is how the ordering fix from RC-42 ends up
+        applied to one of them and not the other.
         """
+        vendor = observed.vendor if match_vendor else None
         major = _major(observed.version)
         rows = self._conn.execute(
             """
@@ -412,7 +433,7 @@ class VulnDB:
                    a.criteria, a.vsi, a.vse, a.vei, a.vee, a.vulnerable
               FROM applicability a JOIN cve c ON c.cve_id = a.cve_id
              WHERE a.part = ?
-               AND (a.vendor = ? OR a.vendor = '*')
+               AND (? IS NULL OR a.vendor = ? OR a.vendor = '*')
                AND (a.product = ? OR a.product = '*')
                AND (? IS NULL OR a.major_lo IS NULL OR a.major_lo <= ?)
                AND (? IS NULL OR a.major_hi IS NULL OR a.major_hi >= ?)
@@ -439,7 +460,7 @@ class VulnDB:
                       a.cve_id DESC
              LIMIT ?
             """,
-            (observed.part, observed.vendor, observed.product,
+            (observed.part, vendor, vendor, observed.product,
              major, major, major, major, major, major, limit + 1),
         ).fetchall()
 
@@ -459,6 +480,19 @@ class VulnDB:
         Matches on the alias table with the *fingerprint* as the haystack,
         which is the same direction `_product_match` uses: an entry aliased
         "http server" must be found for a banner reading "Apache httpd".
+
+        Whole words, not fragments. A raw `instr(needle, alias)` matched any
+        alias appearing anywhere inside the product string, and on a full
+        corpus the alias table holds single characters: `i` on 167 CVEs, plus
+        `ie`, `go`, `qt`, `mq`, `rt`, `jq`, `3d`, `zz`. `instr('nginx', 'i')`
+        is true, so one of those CVEs surfaced as the top lead for nginx, for
+        Microsoft IIS and for Jenkins simultaneously -- three unrelated
+        products, one wrong answer, and it looked exactly like a hit.
+
+        Padding both sides with spaces makes the alias match as a token. It
+        also keeps the short ones honest rather than banning them: `go` is a
+        real product with real CVEs, and it should match the word "go" and
+        not the middle of "mongodb".
         """
         if not product or not product.strip():
             return []
@@ -470,7 +504,8 @@ class VulnDB:
                    NULL AS criteria, NULL AS vsi, NULL AS vse, NULL AS vei,
                    NULL AS vee, 1 AS vulnerable
               FROM product_alias p JOIN cve c ON c.cve_id = p.cve_id
-             WHERE p.alias != '' AND instr(?, p.alias) > 0
+             WHERE p.alias != ''
+               AND instr(' ' || ? || ' ', ' ' || p.alias || ' ') > 0
              LIMIT ?
             """,
             (needle, limit),
@@ -494,6 +529,21 @@ class VulnDB:
             "SELECT 1 FROM applicability "
             " WHERE part = ? AND vendor = ? AND product = ? LIMIT 1",
             (observed.part, observed.vendor, observed.product)).fetchone()
+        return row is not None
+
+    def knows_product(self, product: str) -> bool:
+        """Has this corpus filed anything under this product, any vendor?
+
+        The gate on tier three. `knows_identity` asks about a vendor:product
+        pair and is the wrong question here: `mysql:mysql` exists in NVD, so
+        it answers "known" and suppresses the fallback -- while every MySQL
+        CVE anyone cares about is filed under `oracle`. Asking about the
+        product alone is what separates "we know this software and your
+        version is fine" from "we have never heard of this software".
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM applicability WHERE product = ? LIMIT 1",
+            (product,)).fetchone()
         return row is not None
 
     def candidates(self, observed: Optional[CPE], product: Optional[str],
@@ -522,20 +572,52 @@ class VulnDB:
 
         Silence for "not affected" and silence for "wrong identifier" read
         identically to an analyst. That is the ambiguity `describe()` exists
-        to shout about, happening a layer down at row level. So the fallback
-        now fires on an unknown identity, and only there. The lead still
-        carries the substring path's weaker `match_method`, so the ledger
-        stays honest about how it was found.
+        to shout about, happening a layer down at row level.
+
+        So there are three tiers, weakening in one direction only:
+
+          1. vendor + product + version   the CPE as observed
+          2. product + version            vendor relaxed, bounds INTACT
+          3. product name, no version     last resort, and it can be wrong
+
+        Tier two is where most of the recovery is, and it is safe: relaxing
+        the vendor cannot admit a version the ranges exclude. Tier three
+        cannot say that, so it runs only when the corpus has never heard of
+        the product under any vendor at all -- at that point silence would be
+        a claim we have no basis for. Leads from it carry the substring
+        path's weaker `match_method`, so the ledger stays honest about how
+        they were reached.
+
+        The first cut of this went straight from tier one to tier three and
+        scored 16/18 on `selfcheck` -- with CVE-2026-16860 topping nginx,
+        IIS and Jenkins simultaneously off a one-character alias. A higher
+        number made of wrong answers is worse than a lower one, because the
+        cost of a bad lead is an operator's afternoon and their trust in
+        every other row.
         """
         if observed is not None:
             found = self.candidates_for_cpe(observed, limit)
-            if found or self.knows_identity(observed):
+            if found:
                 return found
+
+            found = self.candidates_for_cpe(observed, limit,
+                                            match_vendor=False)
+            if found:
+                log.info(
+                    "%s:%s matched on product alone; this corpus files that "
+                    "product under a different vendor. Version bounds still "
+                    "applied.", observed.vendor, observed.product)
+                return found
+
+            if self.knows_product(observed.product):
+                # Known product, no version match at either tier. That is an
+                # answer, and the answer is "not affected".
+                return []
+
             log.info(
-                "%s:%s is not an identity this corpus knows; falling back to "
-                "the product-name path. The CPE is probably spelled "
-                "differently here than in NVD.",
-                observed.vendor, observed.product)
+                "%s is not a product this corpus knows under any vendor; "
+                "falling back to the product-name path, which carries no "
+                "version bounds.", observed.product)
         return self.candidates_for_product(product, limit)
 
     def get(self, cve_id: str) -> Optional[VulnEntry]:

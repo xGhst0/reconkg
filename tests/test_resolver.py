@@ -260,22 +260,70 @@ def test_a_known_identity_with_no_version_match_stays_silent(corpus):
     db.close()
 
 
-def test_an_unknown_identity_falls_back_instead_of_reporting_clean(corpus):
-    """The half that must.
+def test_a_vendor_disagreement_is_recovered_with_version_bounds_intact(corpus):
+    """Tier two, and where nearly all the recovery lives.
 
     Same product, under a vendor this corpus has never filed anything for --
-    the nmap-versus-NVD spelling disagreement. The CPE lookup returns nothing
-    because the key is wrong, not because the host is clean, so ending the
-    search there reports a vulnerable service as having no leads.
+    the nmap-versus-NVD disagreement that hides every MySQL CVE behind
+    `oracle` and every nginx one behind `f5`. The lookup returned nothing
+    because the key was wrong, not because the host was clean.
+
+    Relaxing the vendor is safe in a way that the substring path is not: the
+    version predicate is untouched, so this cannot admit a CVE the ranges
+    exclude. 2.5 is inside [2.0, 3.0) and the entry comes back.
     """
     db = VulnDB(corpus)
     observed = parse_cpe("cpe:2.3:a:notavendor:widgetserv:2.5:*:*:*:*:*:*:*")
 
     assert db.knows_identity(observed) is False
+    assert db.candidates_for_cpe(observed) == [], "tier one should not match"
+
     found = db.candidates(observed, "widgetserv")
     assert [e.cve_id for e in found] == [CORPUS_ONLY.cve_id], (
-        "an unrecognised vendor suppressed the product-name fallback, so a "
-        "CVE that is in the corpus was reported as absent")
+        "an unrecognised vendor suppressed the product lookup, so a CVE that "
+        "is in the corpus was reported as absent")
+    db.close()
+
+
+def test_a_vendor_disagreement_still_respects_the_version_range(corpus):
+    """Tier two must not become tier three by another name.
+
+    Same unknown vendor, but a version outside the entry's range. If
+    relaxing the vendor also relaxed the bounds, this would return a lead
+    for a host running six majors past the fix -- which is the exact failure
+    the original single-tier design was written to prevent, reintroduced
+    through the door added to fix a different problem.
+    """
+    db = VulnDB(corpus)
+    observed = parse_cpe("cpe:2.3:a:notavendor:widgetserv:9.9:*:*:*:*:*:*:*")
+
+    assert db.candidates(observed, "widgetserv") == []
+    db.close()
+
+
+def test_a_one_character_alias_does_not_match_every_product(corpus):
+    """The false positive that made 16/18 worse than 13/18.
+
+    On a full corpus the alias table holds single characters -- `i` on 167
+    CVEs, plus `ie`, `go`, `qt`, `mq`. A raw `instr(needle, alias)` made
+    `instr('nginx', 'i')` true, so one CVE surfaced as the top lead for
+    nginx, Microsoft IIS and Jenkins at once: three unrelated products, one
+    wrong answer, indistinguishable from a hit.
+
+    Matching whole words keeps the short aliases usable rather than banning
+    them -- `go` is a real product, and it should match the word "go" and
+    not the middle of "mongodb".
+    """
+    db = VulnDB(corpus)
+    with VulnDB(corpus) as writer:
+        writer._conn.execute(
+            "INSERT INTO product_alias(cve_id, alias) VALUES(?, 'i')",
+            (CORPUS_ONLY.cve_id,))
+        writer._conn.commit()
+
+    assert db.candidates_for_product("nginx") == []
+    assert db.candidates_for_product("jenkins") == []
+    assert db.candidates_for_product("microsoft iis httpd") == []
     db.close()
 
 
