@@ -834,6 +834,20 @@ async def test_a_real_scan_of_loopback_returns_parsed_evidence(monkeypatch):
     is a suite that eventually scans a network nobody authorised, and the
     BRIEF is explicit that a bypass here means "scanned a host you were not
     authorised to touch" rather than "bad data".
+
+    What this pins is the plumbing: nmap was found, executed, exited cleanly,
+    wrote XML this project's own parser accepted, and its temp file was
+    removed afterwards. Nothing else in the file proves the binary actually
+    runs -- every other case replays a fixture through a fake process.
+
+    It deliberately does NOT assert that the host comes back with open ports.
+    `-F` covers the top 100, and a box with nothing listening there yields an
+    empty result *correctly* -- nmap reports the host down and the importer
+    skips it. That is a fact about the machine, not about reconkg, and an
+    earlier version of this test asserted it and failed on a box whose only
+    listener was on 8765. Asserting it is a test that reads the machine
+    instead of controlling it, which is the defect this suite already found
+    once in test_console.py.
     """
     monkeypatch.setattr(runner, "_slots", None)
 
@@ -842,14 +856,17 @@ async def test_a_real_scan_of_loopback_returns_parsed_evidence(monkeypatch):
     assert record.returncode == 0
     assert record.timed_out is False
     assert isinstance(record.result, ImportResult)
-    assert list(record.result.hosts) == ["127.0.0.1"]
+
+    # Whatever it found, it may only ever have found loopback.
+    assert set(record.result.hosts) <= {"127.0.0.1"}
+    assert set(record.result.discovered_only) <= {"127.0.0.1"}
 
     payload = record.as_dict()
     assert payload["command"][0] == runner.available()
     assert payload["command"][-2:] == ["--", "127.0.0.1"]
     assert "-sT" in payload["command"]
     assert "-sV" not in payload["command"], "the quick profile grew a -sV"
-    assert payload["hosts"] == 1
+    assert payload["hosts"] == len(record.result.hosts)
 
     xml_path = record.argv[record.argv.index("-oX") + 1]
     assert not Path(xml_path).exists(), "a real run left its XML behind"
