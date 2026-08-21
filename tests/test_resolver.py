@@ -234,6 +234,68 @@ def test_an_unreadable_build_date_is_reported_not_crashed(corpus):
 
 
 # --------------------------------------------------------------------------- #
+# An empty CPE result has two causes, and only one of them is an answer
+#
+# Found by `selfcheck` against a full 381,322-CVE corpus: nginx, MySQL, IIS
+# and vsftpd each returned zero leads, and not one was a corpus gap. nmap
+# emits `mysql:mysql` where NVD files MySQL under vendor `oracle`,
+# `nginx:nginx` where NVD has `f5`, `microsoft:iis` where NVD writes
+# `internet_information_services`. Every one of those CVEs was present and
+# unreachable, and the silence was indistinguishable from "not affected".
+# --------------------------------------------------------------------------- #
+
+def test_a_known_identity_with_no_version_match_stays_silent(corpus):
+    """The half that must NOT fall back.
+
+    `fictional:widgetserv` is in this corpus, bounded 2.0 <= v < 3.0. A host
+    on 9.9 is genuinely unaffected, and re-admitting the entry through the
+    substring path -- which carries no version bounds at all -- would hand
+    that host a lead for something fixed six majors earlier.
+    """
+    db = VulnDB(corpus)
+    observed = parse_cpe("cpe:2.3:a:fictional:widgetserv:9.9:*:*:*:*:*:*:*")
+
+    assert db.knows_identity(observed) is True
+    assert db.candidates(observed, "widgetserv") == []
+    db.close()
+
+
+def test_an_unknown_identity_falls_back_instead_of_reporting_clean(corpus):
+    """The half that must.
+
+    Same product, under a vendor this corpus has never filed anything for --
+    the nmap-versus-NVD spelling disagreement. The CPE lookup returns nothing
+    because the key is wrong, not because the host is clean, so ending the
+    search there reports a vulnerable service as having no leads.
+    """
+    db = VulnDB(corpus)
+    observed = parse_cpe("cpe:2.3:a:notavendor:widgetserv:2.5:*:*:*:*:*:*:*")
+
+    assert db.knows_identity(observed) is False
+    found = db.candidates(observed, "widgetserv")
+    assert [e.cve_id for e in found] == [CORPUS_ONLY.cve_id], (
+        "an unrecognised vendor suppressed the product-name fallback, so a "
+        "CVE that is in the corpus was reported as absent")
+    db.close()
+
+
+def test_a_wildcard_row_does_not_make_every_identity_known(corpus):
+    """`knows_identity` matches exactly, and this is why.
+
+    Applicability rows carry `*` for unspecified attributes. If the probe
+    honoured wildcards, a single `vendor='*'` row among 2.8 million
+    statements would answer "known" for every identifier ever invented --
+    turning the check into a constant and restoring the exact bug it exists
+    to close.
+    """
+    db = VulnDB(corpus)
+    unknown = parse_cpe("cpe:2.3:a:nobody:nothing:1.0:*:*:*:*:*:*:*")
+
+    assert db.knows_identity(unknown) is False
+    db.close()
+
+
+# --------------------------------------------------------------------------- #
 # coerce
 # --------------------------------------------------------------------------- #
 

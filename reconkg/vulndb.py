@@ -477,24 +477,65 @@ class VulnDB:
         ).fetchall()
         return _rows_to_entries(rows)
 
+    def knows_identity(self, observed: CPE) -> bool:
+        """Has this corpus ever filed anything under this vendor:product?
+
+        The question that makes an empty candidate set interpretable.
+
+        Exact match, no wildcards on purpose: a single `vendor='*'` row
+        anywhere in 2.8 million applicability statements would otherwise
+        answer "yes" for every identifier ever invented, which is the reverse
+        of what this is for.
+
+        `part` leads the `applicability_identity` index, so including it
+        makes this a prefix seek rather than a scan.
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM applicability "
+            " WHERE part = ? AND vendor = ? AND product = ? LIMIT 1",
+            (observed.part, observed.vendor, observed.product)).fetchone()
+        return row is not None
+
     def candidates(self, observed: Optional[CPE], product: Optional[str],
                    limit: int = 500) -> list[VulnEntry]:
         """The lookup the engine actually calls.
 
-        The alias fallback fires only when there was no usable CPE to look up
-        with. It deliberately does NOT fire when the CPE lookup ran and came
-        back empty, because that empty result is an *answer*: the version was
-        outside every applicability range. Falling back at that point
-        re-admits the same entry through the substring path, which has no
-        version bounds at all, and a host running 4.0 gets a lead for a
-        vulnerability fixed in 3.0.
+        An empty CPE result used to end the search, on the reasoning that it
+        is an *answer*: the version fell outside every applicability range,
+        and re-admitting the entry through the substring path -- which has no
+        version bounds at all -- would hand a host running 4.0 a lead for a
+        vulnerability fixed in 3.0. That reasoning is correct and is kept.
 
-        This is the same shape as the earlier audit findings -- a control
-        enforced on one path and bypassed on the second. Here the version
-        check lives in the CPE query, and the fallback routed around it.
+        What it missed is that emptiness has two causes and only one of them
+        is an answer:
+
+            known identity, nothing matched -> not affected. Stay silent.
+            unknown identity                -> we looked up the wrong key.
+
+        nmap's CPE dictionary and NVD's disagree about names often enough to
+        matter: nmap emits `mysql:mysql` where NVD files MySQL under vendor
+        `oracle`, `nginx:nginx` where NVD has `f5`, and `microsoft:iis` where
+        NVD spells it `internet_information_services`. Measured against
+        `selfcheck`'s eighteen realistic fingerprints on a full 381k corpus,
+        four of the five misses were this and none were corpus gaps -- every
+        one of those CVEs was present and unreachable.
+
+        Silence for "not affected" and silence for "wrong identifier" read
+        identically to an analyst. That is the ambiguity `describe()` exists
+        to shout about, happening a layer down at row level. So the fallback
+        now fires on an unknown identity, and only there. The lead still
+        carries the substring path's weaker `match_method`, so the ledger
+        stays honest about how it was found.
         """
         if observed is not None:
-            return self.candidates_for_cpe(observed, limit)
+            found = self.candidates_for_cpe(observed, limit)
+            if found or self.knows_identity(observed):
+                return found
+            log.info(
+                "%s:%s is not an identity this corpus knows; falling back to "
+                "the product-name path. The CPE is probably spelled "
+                "differently here than in NVD.",
+                observed.vendor, observed.product)
         return self.candidates_for_product(product, limit)
 
     def get(self, cve_id: str) -> Optional[VulnEntry]:
