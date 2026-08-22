@@ -553,11 +553,13 @@ function showScanCommand(parts) {
 }
 
 let scannerReady = false;
+let webReady = false;
 
 async function probeScanner() {
   const select = clear($("profile"));
   const button = $("nmap");
   scannerReady = false;
+  webReady = false;
   select.disabled = true;
   button.disabled = true;
   $("oneshot").disabled = true;
@@ -594,6 +596,7 @@ async function probeScanner() {
   button.disabled = false;
   $("oneshot").disabled = false;
   scannerReady = true;
+  webReady = Boolean(scanner.web_available);
   note("nmap ready at " + (scanner.path || "an unnamed path") + "; " +
        select.childElementCount + " profile(s)");
 }
@@ -1354,7 +1357,7 @@ async function findCves() {
   button.disabled = true;
   clear($("nmap-command"));
   try {
-    note("1/3  declaring " + address + " ...");
+    note((webReady ? "1/4" : "1/3") + "  declaring " + address + " ...");
     await api("/api/targets", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
@@ -1365,7 +1368,7 @@ async function findCves() {
     await selectTarget();
 
     const profile = $("profile").value || "service";
-    note("2/3  nmap " + profile + " against " + address +
+    note((webReady ? "2/4" : "2/3") + "  nmap " + profile + " against " + address +
          " -- minutes, not seconds");
     const run = await api(
       "/api/targets/" + encodeURIComponent(address) + "/nmap", {
@@ -1385,7 +1388,28 @@ async function findCves() {
            "the 'service' profile is the one that carries it.", "err");
     }
 
-    note("3/3  correlating " + run.services + " service(s) ...");
+    if (webReady) {
+      note("3/4  fingerprinting the web layer ...");
+      try {
+        const web = await api("/api/targets/" + encodeURIComponent(address) +
+                              "/webscan", {method: "POST"});
+        const apps = (web.apps || []).length;
+        if (apps) {
+          logEvent("web layer: " + apps + " application fingerprint(s)", "ok");
+        }
+      } catch (err) {
+        //  409 is "this host runs no HTTP service", an ordinary outcome and
+        //  not a failure. Everything else is worth showing -- but none of it
+        //  may abort the chain: the nmap evidence is already staged, and
+        //  throwing it away because the web pass failed would lose the run.
+        if (err.message.indexOf("409") !== 0) {
+          note("web fingerprinting: " + err.message, "err");
+        }
+      }
+    }
+
+    note((webReady ? "4/4" : "3/3") + "  correlating " + run.services +
+         " service(s) ...");
     const report = await api("/api/targets/" + encodeURIComponent(address) +
                              "/scan", {method: "POST"});
     const leads = (report && report.ledger) ? report.ledger.length : 0;

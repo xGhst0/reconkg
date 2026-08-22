@@ -477,10 +477,18 @@ async def scanner_status(
     somebody tells them.
     """
     path = runner.available()
+    web = runner.web_available()
     return {"available": path is not None,
             "path": path,
             "profiles": runner.profile_names(),
-            "default_profile": runner.DEFAULT_PROFILE}
+            "default_profile": runner.DEFAULT_PROFILE,
+            # Reported separately because the two degrade independently: a
+            # box with nmap and no whatweb can still scan and still miss
+            # every web application, and an operator should be able to see
+            # which of those they have rather than inferring it from a
+            # ledger that is quietly short.
+            "web_available": web is not None,
+            "web_path": web}
 
 
 @app.post("/api/import", status_code=201)
@@ -521,6 +529,87 @@ async def import_scan(
             422, "empty request body; POST the nmap XML itself, not a form")
 
     return await _stage_import(_parse_uploaded_scan(raw), principal)
+
+
+@app.post("/api/targets/{address}/webscan", status_code=201)
+async def web_scan(
+        address: str,
+        principal: Principal = Depends(require_role(Role.OPERATOR))) -> dict:
+    """Fingerprint the web layer on ports already identified as HTTP.
+
+    The producer `HttpAppStage` has waited for since it was written. That
+    stage declares `tool = "whatweb"`, `sources.py` registers whatweb at
+    0.85, the planner raises `http_service_without_app_fingerprint` and
+    names the module that closes it -- and nothing ever wrote the evidence,
+    so the slot reported `no_data` on every scan ever run.
+
+    Ports come from the graph rather than the request. A caller cannot
+    nominate what to fingerprint: only services *this host has already been
+    observed running* are eligible, so a scan cannot be steered at a port
+    nobody found. That also means this is strictly a second pass -- run a
+    scan first, or there is nothing here to work from.
+    """
+    target = _get_target(address)
+    require_scope(principal, target)
+    host = state.store.get(target)
+    if host is None:
+        raise HTTPException(
+            404, f"no such target: {address}. Scan it first -- the web layer "
+                 "is fingerprinted on ports already known to speak HTTP.")
+
+    ports = [(port.number, port.service.name) for port in host.ports
+             if port.service and port.service.name in runner.HTTP_SERVICES]
+    if not ports:
+        # 409 rather than an empty success: "nothing to do" and "found
+        # nothing" are different answers, and an empty 201 would read as the
+        # second when it is the first.
+        raise HTTPException(
+            409, f"{target} has no port identified as "
+                 f"{', '.join(runner.HTTP_SERVICES)}. Run a service scan "
+                 "first; the web layer is a second pass over what that found.")
+
+    allowed, retry = state.limiter.check(principal.name, cost=10.0)
+    if not allowed:
+        state.metrics.inc("reconkg_ratelimit_rejections_total",
+                          principal=principal.name, route="webscan")
+        raise HTTPException(429, "scan rate limit exceeded",
+                            headers={"Retry-After": str(int(retry) + 1)})
+
+    outcome = "error"
+    try:
+        with correlation_scope(target=target, principal=principal.name):
+            try:
+                record, apps = await runner.run_web(target, ports)
+            except runner.ScannerMissing as exc:
+                raise HTTPException(409, str(exc)) from None
+            except runner.ScannerTimeout as exc:
+                raise HTTPException(504, str(exc)) from None
+            except runner.ScannerError as exc:
+                raise HTTPException(502, str(exc)) from None
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from None
+
+            # Filed under the tool key the stage reads, and only that. The
+            # ceiling in `sources.py` is keyed on the same string, so a
+            # mismatch would both hide the evidence and drop its reliability
+            # to the unregistered-tool floor of 0.25 -- below the 0.45
+            # correlation floor, and therefore silent twice over.
+            state.evidence.put(runner.WEB_TOOL, target, {"apps": apps},
+                               principal=principal.name)
+            state.metrics.inc("reconkg_evidence_submissions_total",
+                              principal=principal.name, tool=runner.WEB_TOOL)
+        outcome = "ok"
+    finally:
+        state.metrics.inc("reconkg_nmap_runs_total",
+                          principal=principal.name, profile=runner.WEB_TOOL,
+                          result=outcome)
+
+    payload = record.as_dict()
+    payload["apps"] = apps
+    payload["ports"] = [number for number, _ in ports]
+    if state.snapshots is not None:
+        state.snapshots.mark_dirty()
+    return payload
 
 
 @app.post("/api/targets/{address}/nmap", status_code=201)

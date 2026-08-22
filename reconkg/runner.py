@@ -42,11 +42,13 @@ addition to a tuple here.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
 import tempfile
 import time
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -272,5 +274,254 @@ async def run(target: str, profile: str = DEFAULT_PROFILE, *,
     finally:
         try:
             os.unlink(xml_path)
+        except OSError:                     # pragma: no cover - defensive
+            pass
+
+
+# --------------------------------------------------------------------------- #
+# whatweb -- the producer `HttpAppStage` was written for and never given
+#
+# `stages.HttpAppStage` declares `tool = "whatweb"`, reads `{"apps": [...]}`
+# from the evidence source, and fires only for ports whose service is
+# http/https/http-alt. `sources.py` registers whatweb at 0.85 -- above
+# nmap-sV's 0.75 and well clear of the 0.45 correlation floor. The slot, the
+# module, the planner gap that names it and the reliability ceiling all
+# shipped. Nothing ever produced the evidence, so every scan logged
+# "web-layer/http-app-probe -> no_data (no web fingerprints)".
+#
+# It matters because `nmap -sV` reads the opening banner and stops. It sees
+# `Server: Microsoft-IIS/10.0` and cannot see that the application behind it
+# is Jenkins 2.222 or WordPress 5.8 -- which is where a large share of
+# actually exploitable CVEs live, and which this corpus holds.
+# --------------------------------------------------------------------------- #
+
+WEB_BINARY = "whatweb"
+
+WEB_TOOL = "whatweb"
+"""The evidence tool key, and it must equal `stages.HttpAppStage.tool`.
+
+Filed under any other name, the producer writes evidence the consumer never
+reads and the stage goes on reporting no_data -- which is the failure this
+whole addition exists to end, reintroduced by a typo.
+"""
+
+#: Passive: one GET per URL, no path guessing. whatweb's `-a 3` and `-a 4`
+#: brute-force directories and plugin paths, which is a materially different
+#: level of contact with the target. That gets its own review rather than a
+#: quiet edit to this constant -- the same rule the nmap profiles are held to.
+WEB_AGGRESSION = "1"
+
+WEB_TIMEOUT = 300.0
+MAX_APPS_PER_PORT = 32
+HTTP_SERVICES = ("http", "https", "http-alt")
+
+
+def web_available() -> Optional[str]:
+    """Absolute path to whatweb, or None. Same contract as `available()`."""
+    return shutil.which(WEB_BINARY)
+
+
+def _web_url(address: str, port: int, service: str) -> str:
+    """One URL, built from validated parts and nothing else.
+
+    The scheme comes from the service nmap identified rather than from the
+    port number: 8443 is not always TLS and 443 is not always HTTPS, and
+    guessing produces a scan of the wrong protocol that reports nothing
+    while looking like it ran.
+    """
+    number = int(port)
+    if not 1 <= number <= 65535:
+        raise ScannerError(f"port out of range: {port}")
+    scheme = "https" if service == "https" else "http"
+    return f"{scheme}://{address}:{number}/"
+
+
+def build_web_argv(target: str, ports, json_path: str) -> tuple[str, ...]:
+    """The whatweb command, from a fixed vocabulary plus validated URLs.
+
+    `ports` is a sequence of `(port, service)` as the graph knows them. The
+    address is re-validated here for the reason the module docstring gives:
+    this is where packets leave, and the ingress that forgets to check is
+    always the one nobody has written yet.
+    """
+    binary = web_available()
+    if binary is None:
+        raise ScannerMissing(
+            f"{WEB_BINARY} is not installed or not on PATH. On Kali: "
+            "`sudo apt install whatweb`.")
+
+    address = validate_address(target)
+    urls = []
+    for port, service in ports:
+        if service not in HTTP_SERVICES:
+            # The caller here is our own route, so this is not a filter on
+            # hostile input. It is a guard against a bug that would
+            # otherwise surface as a silent empty result: the stage consumes
+            # http ports only, so anything else fingerprinted here is work
+            # nothing will ever read.
+            raise ScannerError(
+                f"{service!r} on port {port} is not an HTTP service; "
+                f"whatweb runs only against {', '.join(HTTP_SERVICES)}")
+        urls.append(_web_url(address, port, service))
+    if not urls:
+        raise ScannerError("no HTTP services to fingerprint")
+
+    return (binary, "-a", WEB_AGGRESSION, "--no-errors",
+            f"--log-json={json_path}", "--", *urls)
+
+
+def _port_from_url(url: str) -> Optional[int]:
+    """The port whatweb reported back, or None.
+
+    Read from whatweb's own `target` rather than assumed from the order the
+    URLs went in: whatweb follows redirects and reorders results, so position
+    is not identity. Attaching a Jenkins fingerprint to the wrong port is
+    worse than missing it.
+    """
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.port:
+            return int(parsed.port)
+        if parsed.scheme == "https":
+            return 443
+        if parsed.scheme == "http":
+            return 80
+    except (ValueError, TypeError):
+        return None
+    return None
+
+
+def parse_whatweb(raw: str) -> list[dict]:
+    """whatweb's JSON into the `apps` shape `HttpAppStage` consumes.
+
+    Only plugins reporting a **version** become fingerprints. A plugin
+    without one is a detection, not a product claim, and promoting it would
+    manufacture precisely the `product_only` matches that gave an IIS 10.0
+    host two 2008 ActiveX CVEs. The version is also load-bearing rather than
+    decorative: `build_leads` skips an unversioned fingerprint outright, so
+    an entry without one is work that produces nothing.
+
+    Both shapes whatweb emits are accepted -- a JSON array, and one object
+    per line -- because which you get depends on the version installed, and
+    a parser written against the one on the author's machine is how RC-22
+    happened.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return []
+    try:
+        blob = json.loads(text)
+        records = blob if isinstance(blob, list) else [blob]
+    except json.JSONDecodeError:
+        records = []
+        for line in text.splitlines():
+            line = line.strip().rstrip(",")
+            if not line or line in ("[", "]"):
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    apps: list[dict] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        port = _port_from_url(str(record.get("target") or ""))
+        if port is None:
+            continue
+        plugins = record.get("plugins")
+        if not isinstance(plugins, dict):
+            continue
+        found = 0
+        for name, detail in plugins.items():
+            if found >= MAX_APPS_PER_PORT:
+                break
+            if not isinstance(detail, dict):
+                continue
+            versions = [str(v).strip() for v in (detail.get("version") or [])
+                        if str(v).strip()]
+            if not versions:
+                continue
+            strings = [str(s).strip() for s in (detail.get("string") or [])
+                       if str(s).strip()]
+            apps.append({
+                "port": port,
+                "product": str(name).strip()[:120],
+                "version": versions[0][:64],
+                "banner": strings[0][:300] if strings else None,
+                # Under whatweb's registered 0.85 ceiling, which clamps it
+                # regardless. Stated here rather than left to the stage's
+                # default so the number is visible where the claim is made.
+                "confidence": 0.8,
+            })
+            found += 1
+    return apps
+
+
+async def run_web(target: str, ports, *,
+                  timeout: Optional[float] = None):
+    """Fingerprint the web layer on ports already known to speak HTTP.
+
+    Returns `(ScanRun, apps)` rather than just the apps, so a caller can
+    report what was run even when it found nothing. An empty result and a
+    failed run look identical otherwise, and telling those two apart is the
+    distinction this project exists to preserve.
+    """
+    global _slots
+    if _slots is None:
+        _slots = asyncio.Semaphore(MAX_CONCURRENT)
+
+    handle, json_path = tempfile.mkstemp(prefix="reconkg-web-",
+                                         suffix=".json")
+    os.close(handle)
+    started = time.monotonic()
+    try:
+        argv = build_web_argv(target, ports, json_path)
+        record = ScanRun(target=target, profile=WEB_TOOL, argv=argv)
+        limit = timeout if timeout is not None else WEB_TIMEOUT
+
+        async with _slots:
+            log.info("web-fingerprinting %s on %d port(s)", target, len(ports))
+            process = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE)
+            try:
+                _out, err = await asyncio.wait_for(process.communicate(),
+                                                   timeout=limit)
+            except asyncio.TimeoutError:
+                record.timed_out = True
+                process.kill()
+                await process.wait()
+                err = b""
+            record.returncode = -1 if record.timed_out else process.returncode
+            record.stderr = err.decode("utf-8", "replace")[:MAX_STDERR]
+        record.duration_s = time.monotonic() - started
+
+        if record.timed_out:
+            raise ScannerTimeout(
+                f"whatweb against {target} exceeded {limit:.0f}s and was "
+                "stopped")
+
+        try:
+            raw = Path(json_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            raw = ""
+        apps = parse_whatweb(raw)
+
+        # whatweb exits non-zero for a target that merely refused the
+        # connection, which is a fact about the host and not a failure of the
+        # run. The log file decides: readable output with a non-zero exit is
+        # reported, silence with a non-zero exit is raised.
+        if not apps and record.returncode not in (0, None):
+            raise ScannerError(
+                f"whatweb exited {record.returncode} and produced no "
+                "fingerprints: "
+                f"{record.stderr.strip()[:300] or 'no error output'}")
+        return record, apps
+    finally:
+        try:
+            os.unlink(json_path)
         except OSError:                     # pragma: no cover - defensive
             pass
