@@ -93,6 +93,19 @@ class AppState:
         self.catalog = ExploitCatalog()
         self.catalog_report = self.catalog.autoload()
         self.engine.catalog = self.catalog
+        # The exploitation-aware ranking, connected. `DiscoveryEngine`
+        # accepts `signals=`, `build_leads` takes it, and
+        # `feeds.ExploitationSignals` implements it with KEV_FACTOR = 1.6 --
+        # every piece shipped and nothing ever passed it, so every ledger
+        # this project has produced ranked on severity alone and printed `-`
+        # under KEV for CVEs that are in it. Same shape as RC-36 and RC-41:
+        # a capability built, tested, given a parameter, and never wired.
+        #
+        # `getattr` because the built-in nine-entry fixture is a
+        # `StaticResolver` with no corpus and therefore no feed paths to
+        # read; it correctly has no opinion about active exploitation.
+        loader = getattr(self.engine.resolver, "signals", None)
+        self.engine.signals = loader() if callable(loader) else None
         self.reports: dict[str, ScanReport] = {}
         self.limiter = RateLimiter()
         self.metrics = Metrics()

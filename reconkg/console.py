@@ -232,6 +232,13 @@ class Console:
         # codebase keeps finding; `None` means "ask the environment" here for
         # exactly the reason it does in `DiscoveryEngine`.
         self.resolver = coerce(reference)
+        # The same wiring app.py needed, on the console's side of it.
+        # RC-41 was exactly this shape: the API and the REPL are two callers
+        # of one thing, and fixing one leaves the other answering
+        # differently about the same host. `getattr` because the built-in
+        # fixture is a StaticResolver with no feed paths to read.
+        _load_signals = getattr(self.resolver, "signals", None)
+        self.signals = _load_signals() if callable(_load_signals) else None
         self.reference = self.resolver
         """Where `build_handoff` reads notes and operator-supplied follow-ups.
 
@@ -580,7 +587,8 @@ class Console:
         engine = DiscoveryEngine(
             self.ws.store, self.ws.evidence,
             [StageSlot(module, [], label=module.meta.fullname)],
-            reference=self.resolver, catalog=self.catalog)
+            reference=self.resolver, catalog=self.catalog,
+            signals=self.signals)
         report = self._await(engine.run(target))
 
         rows = [[a.stage, a.outcome, f"{a.duration_ms:.2f}ms", a.detail]

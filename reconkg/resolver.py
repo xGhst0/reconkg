@@ -160,6 +160,53 @@ class DbResolver:
             log.warning("entry lookup failed for %s: %s", cve_id, exc)
             return None
 
+    def signals(self):
+        """KEV and EPSS, from the paths this corpus recorded when it was built.
+
+        `builddb` deliberately leaves these two as files and stores their
+        locations in `meta` rather than copying them into tables: both are
+        regenerated daily, and rebuilding a 381k-CVE database every morning
+        to pick up a scoring input that reloads in a second is the wrong
+        trade. The consequence is that somebody has to read them back, and
+        for the life of this project nobody did.
+
+        `DiscoveryEngine` accepts `signals=`, `build_leads` takes it as its
+        last argument and `feeds.ExploitationSignals` implements it with
+        KEV_FACTOR = 1.6 -- the whole argument that a mid-severity CVE under
+        active exploitation outranks a maximum-severity one nobody is
+        touching. Every piece shipped and the parameter was never passed, so
+        every ledger ever produced ranked on severity alone and printed `-`
+        under KEV for CVEs that are unquestionably in it.
+
+        Returns None when neither feed is readable, so the caller can tell
+        "no exploitation data" from "nothing is exploited" -- absent, leads
+        rank on severity, which the research is explicit is not risk.
+        """
+        from .feeds import EpssScores, ExploitationSignals, KevCatalog
+
+        def _load(kind, path, loader):
+            if not path:
+                return None
+            try:
+                feed = loader()
+                feed.load(path)
+                return feed
+            except (FileNotFoundError, ValueError, OSError) as exc:
+                # Recorded but unreadable is worth saying out loud: it means
+                # the corpus was built against a file that has since moved,
+                # and the ranking silently degrades to severity-only.
+                log.warning("%s recorded at %s but unreadable (%s); leads "
+                            "will rank without it", kind, path, exc)
+                return None
+
+        kev = _load("KEV", self._db.get_meta("kev_path"), KevCatalog)
+        epss = _load("EPSS", self._db.get_meta("epss_path"), EpssScores)
+        if kev is None and epss is None:
+            return None
+        log.info("exploitation signals: %s KEV entries, %s EPSS scores",
+                 len(kev) if kev else 0, len(epss) if epss else 0)
+        return ExploitationSignals(kev=kev, epss=epss)
+
     def describe(self) -> str:
         stats = self._db.stats()
         built = self._db.get_meta("built_at")
