@@ -501,7 +501,11 @@ async def scanner_status(
             # which of those they have rather than inferring it from a
             # ledger that is quietly short.
             "web_available": web is not None,
-            "web_path": web}
+            "web_path": web,
+            # Metasploit is the confirmer, not a scanner: `check` turns a
+            # version-inferred lead into a verdict about this host. Reported
+            # here so the page can offer that only when it can honour it.
+            "check_available": runner.msf_available() is not None}
 
 
 @app.post("/api/import", status_code=201)
@@ -542,6 +546,87 @@ async def import_scan(
             422, "empty request body; POST the nmap XML itself, not a form")
 
     return await _stage_import(_parse_uploaded_scan(raw), principal)
+
+
+@app.post("/api/targets/{address}/check/{cve_id}", status_code=201)
+async def check_lead(
+        address: str, cve_id: str,
+        principal: Principal = Depends(require_role(Role.OPERATOR))) -> dict:
+    """Ask Metasploit whether this host actually has this CVE.
+
+    The difference between a ledger of suspicion and a ledger of fact. Every
+    lead here arrived by version inference: a version string was read off a
+    banner and matched against an applicability range. That is a claim about
+    what the software *should* be vulnerable to, and on a distribution build
+    with backported fixes it is frequently wrong -- which the backport marker
+    already says on every affected row without being able to resolve it.
+
+    `check` resolves it. `commands.FIRING_VERBS` deliberately omits the verb,
+    and says why: it "probes for applicability without exploiting, which is
+    the behaviour this tool is for." Nothing is delivered and nothing is run
+    on the target; the module answers whether its own preconditions hold.
+
+    The module name comes from the operator's own Metasploit index and never
+    from the request. `catalog.py` is emphatic about this: a fabricated path
+    that half-matches a CVE costs an afternoon and teaches an operator to
+    distrust every other row.
+    """
+    target = _get_target(address)
+    require_scope(principal, target)
+    host = state.store.get(target)
+    if host is None:
+        raise HTTPException(404, f"no such target: {address}")
+
+    wanted = (cve_id or "").strip().upper()
+    ports = [row.port for row in state.reports[target].ledger
+             if row.cve_id == wanted] if target in state.reports else []
+    if not ports:
+        raise HTTPException(
+            404, f"{wanted} is not a lead on {target}. Scan first: a check "
+                 "confirms a lead the ledger already holds, it does not go "
+                 "looking for new ones.")
+
+    modules = state.catalog.msf_modules_for(wanted)
+    if not modules:
+        # Not a failure. An empty index answer means this installation holds
+        # no module for the CVE, which is a different fact from the host
+        # being safe -- and saying so is the whole point of the corpus panel.
+        raise HTTPException(
+            409, f"your Metasploit index holds no module for {wanted}, so "
+                 "there is nothing to ask. That is not evidence the host is "
+                 "unaffected; it is evidence nobody has written a module.")
+
+    allowed, retry = state.limiter.check(principal.name, cost=10.0)
+    if not allowed:
+        state.metrics.inc("reconkg_ratelimit_rejections_total",
+                          principal=principal.name, route="check")
+        raise HTTPException(429, "check rate limit exceeded",
+                            headers={"Retry-After": str(int(retry) + 1)})
+
+    outcome = "error"
+    try:
+        with correlation_scope(target=target, principal=principal.name):
+            try:
+                result = await runner.run_check(modules[0], target, ports[0],
+                                                cve_id=wanted)
+            except runner.ScannerMissing as exc:
+                raise HTTPException(409, str(exc)) from None
+            except runner.ScannerTimeout as exc:
+                raise HTTPException(504, str(exc)) from None
+            except runner.ScannerError as exc:
+                raise HTTPException(502, str(exc)) from None
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from None
+        outcome = "ok"
+    finally:
+        state.metrics.inc("reconkg_nmap_runs_total",
+                          principal=principal.name, profile="msf-check",
+                          result=outcome)
+
+    payload = result.as_dict()
+    # Named so an operator can see the choice was made rather than assumed.
+    payload["modules_available"] = modules
+    return payload
 
 
 @app.post("/api/targets/{address}/webscan", status_code=201)

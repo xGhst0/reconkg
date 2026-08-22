@@ -525,3 +525,179 @@ async def run_web(target: str, ports, *,
             os.unlink(json_path)
         except OSError:                     # pragma: no cover - defensive
             pass
+
+
+# --------------------------------------------------------------------------- #
+# `check` -- confirming a lead against the host, without exploiting it
+#
+# `commands.FIRING_VERBS` is {run, exploit, rerun, rexploit, rcheck} and its
+# comment says why `check` is absent: "it probes for applicability without
+# exploiting, which is the behaviour this tool is for". That capability was
+# designed in and never used.
+#
+# It is the difference between a ledger of suspicion and a ledger of fact. A
+# host produced 97 leads from version inference; the exploit index
+# cross-references 3,030 CVEs to Metasploit modules, and for any lead in that
+# set `check` answers whether this host actually has it. Ninety-seven maybes
+# become three confirmations and ninety-four inferences, which is the whole
+# job.
+#
+# Nothing here composes a firing verb. The setup list is handed to
+# `commands._refuse_firing_verbs`, which splits it the way msfconsole splits
+# its own `-x` argument (RC-32) rather than the way Python would -- a check
+# that tokenises differently from the thing it protects is a check that
+# agrees only with itself.
+# --------------------------------------------------------------------------- #
+
+MSF_BINARY = "msfconsole"
+MSF_TIMEOUT = 300.0
+"""msfconsole takes tens of seconds just to start. The ceiling is generous
+because the alternative -- killing it during load -- looks identical to a
+target that did not answer."""
+
+#: Ordered, and the order is load-bearing. "does not support check" contains
+#: the word "check" and "cannot reliably check exploitability" contains
+#: "exploitability"; testing for a verdict before ruling out a non-answer
+#: reads MSF declining to answer as an answer.
+_CHECK_VERDICTS = (
+    ("unsupported", ("does not support check", "no check implemented")),
+    ("unknown", ("cannot reliably check", "check failed", "check raised")),
+    ("vulnerable", ("appears to be vulnerable", "is vulnerable",
+                    "target is vulnerable")),
+    ("safe", ("is not exploitable", "is not vulnerable",
+              "target is not vulnerable", "the target is safe")),
+)
+
+
+@dataclass
+class CheckResult:
+    """One module's verdict on one service. Never an exploitation attempt."""
+
+    target: str
+    port: int
+    cve_id: str
+    module: str
+    verdict: str = "unknown"
+    detail: str = ""
+    duration_s: float = 0.0
+    argv: tuple = ()
+
+    @property
+    def confirmed(self) -> bool:
+        return self.verdict == "vulnerable"
+
+    def as_dict(self) -> dict:
+        return {"target": self.target, "port": self.port,
+                "cve_id": self.cve_id, "module": self.module,
+                "verdict": self.verdict, "detail": self.detail[:600],
+                "duration_s": round(self.duration_s, 1),
+                "command": list(self.argv), "confirmed": self.confirmed}
+
+
+def msf_available() -> Optional[str]:
+    """Absolute path to msfconsole, or None."""
+    return shutil.which(MSF_BINARY)
+
+
+def parse_check_output(text: str) -> tuple[str, str]:
+    """msfconsole's check output as (verdict, the line that decided it).
+
+    Returning the deciding line rather than only the verdict, because an
+    operator who disagrees with a verdict needs to see what it was read
+    from. A bare "safe" that cannot be traced back to a sentence is a claim
+    with no provenance, which is the thing this project refuses everywhere
+    else.
+    """
+    lowered = (text or "").lower()
+    for verdict, needles in _CHECK_VERDICTS:
+        for needle in needles:
+            index = lowered.find(needle)
+            if index == -1:
+                continue
+            start = lowered.rfind("\n", 0, index) + 1
+            end = lowered.find("\n", index)
+            line = (text[start:end] if end != -1 else text[start:]).strip()
+            return verdict, line[:400]
+    return "unknown", ""
+
+
+def build_check_argv(module: str, target: str, port: int) -> tuple[str, ...]:
+    """The msfconsole line that asks, and cannot tell it to fire.
+
+    `module` must have come from the operator's own Metasploit index --
+    `catalog.py` is emphatic that a fabricated path which half-matches a CVE
+    costs an afternoon and teaches an operator to distrust the tool. This
+    validates the shape; the caller is responsible for the provenance, and
+    the route only passes paths it read out of the index.
+    """
+    from .commands import _refuse_firing_verbs, validate_module_path
+
+    binary = msf_available()
+    if binary is None:
+        raise ScannerMissing(
+            f"{MSF_BINARY} is not installed or not on PATH. On Kali: "
+            "`sudo apt install metasploit-framework`.")
+
+    path = validate_module_path(module)
+    address = validate_address(target)
+    number = int(port)
+    if not 1 <= number <= 65535:
+        raise ScannerError(f"port out of range: {port}")
+
+    setup = [f"use {path}", f"set RHOSTS {address}", f"set RPORT {number}",
+             "check", "exit"]
+    # Splits the way msfconsole splits, not the way Python does. `check` is
+    # deliberately not a firing verb; anything that became one -- through a
+    # module path carrying a `;`, or a future edit to this list -- is refused
+    # here rather than discovered on a live host.
+    _refuse_firing_verbs(setup, path)
+    return (binary, "-q", "-x", "; ".join(setup))
+
+
+async def run_check(module: str, target: str, port: int, cve_id: str = "", *,
+                    timeout: Optional[float] = None) -> CheckResult:
+    """Ask one Metasploit module whether this host is actually vulnerable.
+
+    A non-zero exit is not a verdict. msfconsole exits non-zero for a module
+    that failed to load as readily as for one that answered, so the verdict
+    comes from the output and the exit status only colours the detail --
+    reading an exit code as "safe" would turn a broken run into a clean bill
+    of health, which is the single worst outcome this function has.
+    """
+    global _slots
+    if _slots is None:
+        _slots = asyncio.Semaphore(MAX_CONCURRENT)
+
+    argv = build_check_argv(module, target, port)
+    result = CheckResult(target=target, port=int(port), cve_id=cve_id,
+                         module=module, argv=argv)
+    limit = timeout if timeout is not None else MSF_TIMEOUT
+    started = time.monotonic()
+
+    async with _slots:
+        log.info("checking %s against %s:%s", module, target, port)
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE)
+        try:
+            out, err = await asyncio.wait_for(process.communicate(),
+                                              timeout=limit)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            result.duration_s = time.monotonic() - started
+            raise ScannerTimeout(
+                f"check of {module} against {target}:{port} exceeded "
+                f"{limit:.0f}s. msfconsole is slow to start; raise the "
+                "timeout before concluding anything about the host.")
+    result.duration_s = time.monotonic() - started
+
+    text = (out or b"").decode("utf-8", "replace") + \
+           (err or b"").decode("utf-8", "replace")
+    result.verdict, result.detail = parse_check_output(text)
+    if result.verdict == "unknown" and not result.detail:
+        result.detail = (text.strip()[-400:] or
+                         f"msfconsole exited {process.returncode} with no "
+                         "readable output")
+    return result
