@@ -120,8 +120,31 @@ def test_the_page_carries_the_hardening_headers(client):
 def test_every_panel_the_spec_asked_for_is_present(client):
     body = client.get("/ui", headers=VIEWER).text
     for panel in ("panel-scan", "panel-graph", "panel-prov", "panel-ledger",
-                  "panel-commands", "panel-corpus"):
+                  "panel-commands", "panel-corpus", "panel-plan"):
         assert f'id="{panel}"' in body, panel
+
+
+def test_the_page_asks_for_the_plan_it_has_always_computed(client):
+    """`GapPlanner` has run on every scan since cycle 5 and the page never
+    called `/plan`, so its output was computed and discarded.
+
+    The cost was not a missing feature, it was a misleading one. A port that
+    produced no lead vanished from the page entirely -- no row, no reason --
+    which reads exactly like a port judged clean. Observed on a real host:
+    ten open ports, leads on one, and nothing whatever said about 135, 139,
+    445 or the five legacy simple-TCP services. The planner had an opinion on
+    every one of them, including that 445 sat below the correlation floor.
+
+    That is the ambiguity `panel-corpus` exists to shout about -- silence
+    that cannot be told from a clean result -- occurring one level down.
+    """
+    body = client.get("/ui", headers=VIEWER).text
+
+    assert '"/plan"' in body, "the page still never asks for the plan"
+    assert "loadPlan" in body
+    # Leads are the ledger's job. Repeating them here would bury the gaps
+    # under the findings, which is the direction this panel pushes against.
+    assert '"lead_ready_for_operator"' in body
 
 
 def test_progress_rides_the_existing_websocket_bus(client):

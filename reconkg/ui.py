@@ -252,6 +252,22 @@ _TEMPLATE = r"""
     <div class="log" id="events"></div>
   </section>
 
+  <!-- 7. what we still do not know, and why. The planner has produced this
+       on every scan since cycle 5 and the page never asked for it, so a port
+       reconkg could not speak about simply vanished -- indistinguishable
+       from a port it had judged clean. That is the ambiguity `panel-corpus`
+       exists to shout about, one level down. -->
+  <section class="wide" id="panel-plan">
+    <h2>Coverage <span class="dim" id="plan-count"></span></h2>
+    <p class="dim">
+      Every open port reconkg could <em>not</em> turn into a lead, and what
+      would change that. A CVE needs a product and a version above the
+      correlation floor; a service that gives neither is not a clean
+      service, it is an unanswered question.
+    </p>
+    <div id="plan-list"></div>
+  </section>
+
   <!-- 6. corpus status, verbatim from each resolver's describe() -->
   <section id="panel-corpus">
     <h2>Corpora</h2>
@@ -443,6 +459,7 @@ async function runScan() {
     note("scan complete: " + leads + " lead(s)", "ok");
     await loadGraph();
     await loadLedger();
+    await loadPlan();
   } catch (err) {
     note(err.message, "err");
   } finally {
@@ -456,6 +473,7 @@ async function selectTarget() {
   await openSocket();
   await loadGraph();
   await loadLedger();
+  await loadPlan();
   renderCommands(null);
 }
 
@@ -612,6 +630,7 @@ async function runNmap() {
     reportWarnings(run.warnings);
     await loadGraph();
     await loadLedger();
+    await loadPlan();
   } catch (err) {
     note(withHint(err.message), "err");
   } finally {
@@ -1243,6 +1262,76 @@ async function useToken() {
 }
 
 // ---------------------------------------------------------------------- //
+// 7. Coverage: the ports reconkg could not turn into a lead.
+// ---------------------------------------------------------------------- //
+
+//  The planner's vocabulary, in an operator's words rather than an enum's.
+//  Unknown keys fall through to the raw value: a gap this page has not been
+//  taught about must still appear, because the whole point of the panel is
+//  that nothing goes missing quietly.
+const GAP_LABELS = {
+  port_open_without_service: "no service identified",
+  service_without_fingerprint: "no fingerprint",
+  fingerprint_without_version: "no version",
+  confidence_below_correlation_floor: "below the correlation floor",
+  single_submitter: "uncorroborated",
+  http_service_without_app_fingerprint: "no web-layer fingerprint",
+  port_filtered_not_resolved: "filtered",
+  credible_claims_conflict: "contradiction"
+};
+
+//  Everything the planner found EXCEPT the leads, which are the ledger.
+//  Repeating them here would bury the gaps under the findings, and the gaps
+//  are the reason this panel exists: a port that produced no lead currently
+//  vanishes from the page entirely, which reads exactly like a port judged
+//  clean. That is the ambiguity the corpus panel warns about, one level down.
+async function loadPlan() {
+  const list = clear($("plan-list"));
+  const count = clear($("plan-count"));
+  if (!state.target) { return; }
+
+  let plan;
+  try {
+    plan = await api("/api/targets/" + encodeURIComponent(state.target) +
+                     "/plan");
+  } catch (err) {
+    list.appendChild(el("p", "err", err.message));
+    return;
+  }
+
+  const gaps = (plan.recommendations || []).filter(function (rec) {
+    return rec.gap !== "lead_ready_for_operator";
+  });
+  count.textContent = gaps.length ? "(" + gaps.length + " unanswered)" : "";
+  if (!gaps.length) {
+    list.appendChild(el("p", "dim",
+      "Every open port produced a fingerprint good enough to match on."));
+    return;
+  }
+
+  const table = el("table");
+  const head = el("tr");
+  ["Port", "Gap", "Why it matters", "What would close it"].forEach(
+    function (title) { head.appendChild(el("th", null, title)); });
+  table.appendChild(head);
+
+  gaps.forEach(function (rec) {
+    const row = el("tr");
+    row.appendChild(el("td", null,
+      rec.port ? rec.protocol + "/" + rec.port : "-"));
+    row.appendChild(el("td", null, GAP_LABELS[rec.gap] || rec.gap));
+    row.appendChild(el("td", null, rec.reason));
+    //  `module` is null for anything that is not a recon action -- the
+    //  planner routes vulnerability work to a human that way on purpose
+    //  (module=None, action=handoff). Rendering a bare null would read as a
+    //  missing feature rather than a deliberate refusal.
+    row.appendChild(el("td", "dim", rec.module || "operator judgement"));
+    table.appendChild(row);
+  });
+  list.appendChild(table);
+}
+
+// ---------------------------------------------------------------------- //
 // One box, one button.
 // ---------------------------------------------------------------------- //
 
@@ -1307,6 +1396,7 @@ async function findCves() {
     else { note(summary); }
     await loadGraph();
     await loadLedger();
+    await loadPlan();
   } catch (err) {
     note(withHint(err.message), "err");
   } finally {
