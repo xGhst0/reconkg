@@ -113,7 +113,7 @@ class DbResolver:
         self._limit = limit
 
     def candidates(self, fp: Fingerprint) -> Sequence[VulnEntry]:
-        from .cpe import parse as parse_cpe
+        from .cpe import infer_cpe, parse as parse_cpe
 
         observed = parse_cpe(fp.cpe) if fp.cpe else None
         if observed is None and fp.cpe:
@@ -123,6 +123,33 @@ class DbResolver:
             # was poor.
             log.warning("unparseable CPE %r on %s; falling back to product "
                         "name", fp.cpe, fp.key)
+
+        # A well-formed CPE naming an identity this corpus has never heard of
+        # is worse than a malformed one, because nothing warns: the lookup
+        # runs, returns nothing, and "no leads" is indistinguishable from
+        # "not vulnerable". nmap and NVD disagree about names often enough
+        # for this to decide whole products -- nmap emits `mysql:mysql` where
+        # NVD files MySQL under `oracle`, `nginx:nginx` where NVD has `f5`,
+        # `microsoft:iis` where NVD writes `internet_information_services`,
+        # and `vsftpd:vsftpd` where NVD has `beasts`. Measured on a full
+        # 381k corpus, that was four of five misses in `selfcheck`, and every
+        # one of those CVEs was present and unreachable.
+        #
+        # `_KNOWN_PRODUCTS` already holds the right spelling for all four --
+        # it was only ever consulted for fingerprints carrying no CPE at all.
+        # Preferring it here is not a relaxation: the swap happens only when
+        # nmap's identity is unknown AND the curated one is known, the table
+        # contains nothing but names actually observed from nmap, and the
+        # version travels with it so the range check is untouched.
+        if observed is not None and not self._db.knows_identity(observed):
+            inferred = infer_cpe(fp.product, fp.version)
+            if inferred is not None and self._db.knows_identity(inferred):
+                log.info("%s:%s is unknown to this corpus; using the curated "
+                         "identity %s:%s for %s",
+                         observed.vendor, observed.product,
+                         inferred.vendor, inferred.product, fp.key)
+                observed = inferred
+
         return self._db.candidates(observed, fp.product, limit=self._limit)
 
     def entry_for(self, cve_id: str) -> Optional[VulnEntry]:

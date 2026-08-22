@@ -580,13 +580,22 @@ class VulnDB:
           2. product + version            vendor relaxed, bounds INTACT
           3. product name, no version     last resort, and it can be wrong
 
-        Tier two is where most of the recovery is, and it is safe: relaxing
-        the vendor cannot admit a version the ranges exclude. Tier three
-        cannot say that, so it runs only when the corpus has never heard of
-        the product under any vendor at all -- at that point silence would be
-        a claim we have no basis for. Leads from it carry the substring
-        path's weaker `match_method`, so the ledger stays honest about how
-        they were reached.
+        Tier two widens the candidate set and nothing more, and it is worth
+        being exact about what that does NOT buy. This method only narrows;
+        `cpe.py` still decides the match, and it compares part, vendor and
+        product. So relaxing the vendor here hands the matcher rows it then
+        rejects on vendor anyway -- it cannot, by itself, recover a
+        vendor-naming disagreement. That correction belongs upstream, where
+        `DbResolver.candidates` substitutes the curated identity from
+        `_KNOWN_PRODUCTS` before the lookup runs. Tier two is retained
+        because a narrowing layer returning a superset is harmless by
+        construction, and it costs one indexed query on the miss path.
+
+        Tier three is the one that can be wrong, so it runs only when the
+        corpus has never heard of the product under any vendor at all -- at
+        that point silence would be a claim we have no basis for. Leads from
+        it carry the substring path's weaker `match_method`, so the ledger
+        stays honest about how they were reached.
 
         The first cut of this went straight from tier one to tier three and
         scored 16/18 on `selfcheck` -- with CVE-2026-16860 topping nginx,

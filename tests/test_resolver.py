@@ -327,6 +327,52 @@ def test_a_one_character_alias_does_not_match_every_product(corpus):
     db.close()
 
 
+def test_an_unknown_vendor_is_corrected_from_the_curated_table(corpus):
+    """The fix that actually works, at the layer where it works.
+
+    Relaxing the vendor in the SQL recovers nothing on its own: `cpe.py`
+    compares part, vendor and product when matching, so candidates found by
+    a vendor-relaxed query are rejected a moment later on vendor. The
+    correction has to happen to the *identity*, before the lookup.
+
+    `_KNOWN_PRODUCTS` already held the right spelling for every product
+    `selfcheck` was missing -- it was simply never consulted for a
+    fingerprint that already carried a CPE, however wrong that CPE was.
+
+    Pinned with a real disagreement rather than the synthetic fixture: nmap
+    emits `mysql:mysql` and NVD files MySQL under `oracle`.
+    """
+    from reconkg.cpe import infer_cpe
+
+    inferred = infer_cpe("MySQL", "5.7.33")
+    assert (inferred.vendor, inferred.product) == ("oracle", "mysql")
+    assert inferred.version == "5.7.33", "the version must travel with it, "\
+        "or the range check has nothing to check"
+
+    for product, expected in (("nginx", ("f5", "nginx")),
+                              ("Microsoft IIS httpd",
+                               ("microsoft", "internet_information_services")),
+                              ("vsftpd", ("beasts", "vsftpd"))):
+        got = infer_cpe(product, "1.0")
+        assert (got.vendor, got.product) == expected, product
+
+
+def test_a_known_identity_is_never_second_guessed(corpus):
+    """The swap must not fire when nmap was right.
+
+    `fictional:widgetserv` is in this corpus, so the curated table is not
+    consulted and the observed CPE stands. A correction that fires whenever
+    a lookup is empty would quietly re-identify hosts on a version miss,
+    which is a far worse failure than the one it fixes.
+    """
+    db = VulnDB(corpus)
+    observed = parse_cpe("cpe:2.3:a:fictional:widgetserv:9.9:*:*:*:*:*:*:*")
+
+    assert db.knows_identity(observed) is True
+    assert db.candidates(observed, "widgetserv") == []
+    db.close()
+
+
 def test_a_wildcard_row_does_not_make_every_identity_known(corpus):
     """`knows_identity` matches exactly, and this is why.
 
