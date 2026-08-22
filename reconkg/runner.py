@@ -456,6 +456,36 @@ def parse_whatweb(raw: str) -> list[dict]:
                 "confidence": 0.8,
             })
             found += 1
+
+        # The application's own name, which is not a versioned product claim
+        # and is the most valuable thing on the page.
+        #
+        # Only versioned plugins become CVE-matchable fingerprints above --
+        # correctly, since `build_leads` skips an unversioned one and a
+        # product-only match manufactures noise. But that rule discarded the
+        # `Title` plugin, and on a real host `Title` read
+        # "rConfig - Configuration Management" while every versioned plugin
+        # reported Apache, OpenSSL, PHP and jQuery. The stack was captured
+        # and the application was thrown away -- the exact gap
+        # `NO_WEB_APPLICATION` was added to complain about, with the answer
+        # already in hand.
+        #
+        # Recorded ambiguous and below the correlation floor on purpose. A
+        # page title is a claim about identity, not about version, and it
+        # must name the application without ever producing a lead on its own.
+        title = plugins.get("Title")
+        if isinstance(title, dict) and found < MAX_APPS_PER_PORT:
+            names = [str(s).strip() for s in (title.get("string") or [])
+                     if str(s).strip()]
+            if names:
+                apps.append({
+                    "port": port,
+                    "product": names[0][:120],
+                    "version": None,
+                    "banner": names[0][:300],
+                    "ambiguous": True,
+                    "confidence": 0.4,
+                })
     return apps
 
 
