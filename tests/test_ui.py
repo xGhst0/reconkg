@@ -504,6 +504,27 @@ MARKUP_SINKS = ["innerHTML", "outerHTML", "insertAdjacentHTML",
                 "document.write", "eval(", "new Function", "srcdoc"]
 
 
+def test_the_one_shot_control_ships_disabled_until_the_scanner_is_probed(
+        client):
+    """`find CVEs` puts packets on the wire, so it must not be pressable
+    before the page knows nmap exists.
+
+    Shipped disabled in the markup rather than disabled by script on load:
+    the pre-probe state is then correct even if the probe never runs -- an
+    anonymous page load, a failed request, a token the operator has not
+    pasted yet. A control that is enabled until something disables it is
+    enabled during every failure of that something.
+    """
+    body = client.get("/ui", headers=VIEWER).text
+
+    assert '<button id="oneshot" disabled>' in body
+    assert '$("oneshot").addEventListener("click", findCves);' in body
+    # Chained from the existing routes, not a combined endpoint: each of the
+    # three carries its own role gate, scope check and rate-limit cost.
+    assert '"/api/targets"' in body
+    assert '"/nmap"' in body
+
+
 def test_the_import_guard_covers_every_sink_this_suite_does():
     """The two lists are one control, and they had already drifted.
 

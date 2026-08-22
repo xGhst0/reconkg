@@ -220,8 +220,14 @@ _TEMPLATE = r"""
     <h2>Target</h2>
     <div class="row">
       <input id="target" size="22" placeholder="10.10.10.42" autocomplete="off">
+      <button id="oneshot" disabled>find CVEs</button>
+    </div>
+    <!-- The three steps `find CVEs` chains, kept because each is separately
+         useful: re-correlate without re-scanning after a corpus rebuild,
+         declare a target you will feed by import, or re-read the graph. -->
+    <div class="row">
       <button id="add">add target</button>
-      <button id="scan">scan</button>
+      <button id="scan">correlate</button>
       <button id="refresh">refresh</button>
     </div>
     <!-- Reconnaissance reconkg runs itself. Deliberately a separate row from
@@ -536,6 +542,7 @@ async function probeScanner() {
   scannerReady = false;
   select.disabled = true;
   button.disabled = true;
+  $("oneshot").disabled = true;
 
   let scanner;
   try {
@@ -567,6 +574,7 @@ async function probeScanner() {
   }
   select.disabled = false;
   button.disabled = false;
+  $("oneshot").disabled = false;
   scannerReady = true;
   note("nmap ready at " + (scanner.path || "an unnamed path") + "; " +
        select.childElementCount + " profile(s)");
@@ -1234,7 +1242,80 @@ async function useToken() {
   await openSocket();
 }
 
+// ---------------------------------------------------------------------- //
+// One box, one button.
+// ---------------------------------------------------------------------- //
+
+// Declare the target, scan it, correlate what came back.
+//
+// Three existing routes rather than one new one. Each already carries its
+// own role gate, scope check and rate-limit cost -- /api/targets is
+// OPERATOR, /nmap is OPERATOR and costs 10, /scan is SCANNER and costs 5 --
+// and a combined endpoint would have to re-derive all three. That is the
+// second path this project keeps finding, and there is no reason to build
+// one here when the browser can call the routes in order.
+//
+// Chained client-side so each step reports as it lands. A service scan runs
+// for minutes; a single spinner over the whole thing tells an operator
+// nothing about which part is slow or which part failed.
+async function findCves() {
+  const address = $("target").value.trim();
+  if (!address) { note("enter an IP or hostname first", "err"); return; }
+  const button = $("oneshot");
+  button.disabled = true;
+  clear($("nmap-command"));
+  try {
+    note("1/3  declaring " + address + " ...");
+    await api("/api/targets", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({address: address})
+    });
+    // Before the scan, not after: this opens the WebSocket, so the live
+    // event log fills in while nmap runs instead of arriving all at once.
+    await selectTarget();
+
+    const profile = $("profile").value || "service";
+    note("2/3  nmap " + profile + " against " + address +
+         " -- minutes, not seconds");
+    const run = await api(
+      "/api/targets/" + encodeURIComponent(address) + "/nmap", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({profile: profile})
+      });
+    showScanCommand(run.command);
+    reportWarnings(run.warnings);
+    if (!run.services) {
+      // Said out loud rather than left to an empty ledger. CVE matching
+      // needs a product and a version, and a profile without -sV produces
+      // neither -- an operator reading "0 leads" would reasonably blame the
+      // corpus for what is actually a missing flag.
+      note("nmap found " + run.hosts + " host(s) and no service versions. " +
+           "CVE matching needs -sV output, so the ledger will be empty; " +
+           "the 'service' profile is the one that carries it.", "err");
+    }
+
+    note("3/3  correlating " + run.services + " service(s) ...");
+    const report = await api("/api/targets/" + encodeURIComponent(address) +
+                             "/scan", {method: "POST"});
+    const leads = (report && report.ledger) ? report.ledger.length : 0;
+    const summary = address + ": " + run.hosts + " host(s), " +
+                    run.services + " service(s), " + leads + " lead(s)";
+    logEvent(summary, leads ? "ok" : "err");
+    if (leads) { note(summary + " -- select one for its commands", "ok"); }
+    else { note(summary); }
+    await loadGraph();
+    await loadLedger();
+  } catch (err) {
+    note(withHint(err.message), "err");
+  } finally {
+    button.disabled = !scannerReady;
+  }
+}
+
 $("save-token").addEventListener("click", useToken);
+$("oneshot").addEventListener("click", findCves);
 $("add").addEventListener("click", addTarget);
 $("scan").addEventListener("click", runScan);
 $("refresh").addEventListener("click", selectTarget);
