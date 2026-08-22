@@ -306,7 +306,22 @@ def _service_entry(port: int, service) -> Optional[dict]:
         entry["tunnel"] = service.get("tunnel")
     cpes = [c.text for c in service.findall("cpe") if c.text]
     if cpes:
-        entry["cpe"] = cpes[0]
+        # Prefer the application CPE over the platform one; `cpes[0]` is not
+        # reliably the identity that version-matches. nmap emits several for
+        # many services -- an `a:` product alongside the `o:` platform it
+        # runs on -- and which comes first is nmap's business, not ours.
+        #
+        # Taking the platform by accident is not a near miss. A *service* is
+        # then looked up as an operating system: wrong part, wrong product,
+        # and usually no version, so the lookup returns nothing and the port
+        # reports clean. Observed on a real host, where port 445 carried
+        # `cpe:/o:microsoft:windows` and nothing else -- correctly, since SMB
+        # is not an application, but the same shape hides a versioned product
+        # wherever nmap happens to list the platform first.
+        entry["cpe"] = next(
+            (c for c in cpes
+             if c.lower().startswith(("cpe:/a:", "cpe:2.3:a:"))),
+            cpes[0])
     extra = " ".join(filter(None, [product, version,
                                    service.get("extrainfo")]))
     if extra:

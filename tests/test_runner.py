@@ -198,7 +198,7 @@ def test_every_profile_has_its_own_ceiling_declared():
 @pytest.mark.parametrize("profile,expected", [
     ("discovery", ("-sn",)),
     ("quick", ("-sT", "-F", "--open")),
-    ("service", ("-sT", "-sV", "--version-intensity", "5", "--open")),
+    ("service", ("-sT", "-sV", "--version-intensity", "9", "--open")),
     ("thorough", ("-sT", "-sV", "-p-", "--open")),
 ])
 def test_each_profile_produces_exactly_this_argv(sandbox, profile, expected):
@@ -464,7 +464,7 @@ async def test_a_successful_run_parses_its_own_xml(sandbox):
     assert record.hosts_up == 1
     assert record.as_dict()["services"] == 5
     assert sandbox.calls[0] == (
-        FAKE_NMAP, "-sT", "-sV", "--version-intensity", "5", "--open",
+        FAKE_NMAP, "-sT", "-sV", "--version-intensity", "9", "--open",
         "-oX", sandbox.xml_path, "--", "127.0.0.1")
     assert not Path(sandbox.xml_path).exists()
 

@@ -9,7 +9,7 @@ exactly one path and this is it. Nothing else in the tree imports
 Three properties, in the order they matter.
 
 **Named profiles, not caller-supplied flags.** The caller asks for
-`service`, never for `-sT -sV --version-intensity 5`. A flag allowlist
+`service`, never for `-sT -sV --version-intensity 9`. A flag allowlist
 would be a filter applied to caller-influenced strings, and this project
 has three separate findings about precisely that shape: RC-31 (a membership
 test that looked type-safe because `Category` subclassed `str`), RC-32
@@ -68,7 +68,7 @@ BINARY = "nmap"
 PROFILES: dict[str, tuple[str, ...]] = {
     "discovery": ("-sn",),
     "quick": ("-sT", "-F", "--open"),
-    "service": ("-sT", "-sV", "--version-intensity", "5", "--open"),
+    "service": ("-sT", "-sV", "--version-intensity", "9", "--open"),
     "thorough": ("-sT", "-sV", "-p-", "--open"),
 }
 
