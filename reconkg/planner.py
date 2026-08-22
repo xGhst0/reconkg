@@ -48,6 +48,7 @@ class Gap(str, Enum):
     BELOW_FLOOR = "confidence_below_correlation_floor"
     UNCORROBORATED = "single_submitter"
     NO_WEB_FINGERPRINT = "http_service_without_app_fingerprint"
+    NO_WEB_APPLICATION = "web_platform_identified_application_not"
     FILTERED_PORT = "port_filtered_not_resolved"
     CONTRADICTION = "credible_claims_conflict"
     LEAD_READY = "lead_ready_for_operator"
@@ -82,6 +83,26 @@ class Recommendation:
         sets = " ".join(f"set {k} {v}" for k, v in self.options.items())
         return f"use {self.module}; {sets}; run".replace(" ;", ";")
 
+
+#: Products that describe what a web application RUNS ON rather than what it
+#: is. whatweb reports both in one list and they are not the same kind of
+#: claim: Apache, OpenSSL, PHP and jQuery are the stack, and on a
+#: distribution build their CVEs are backported anyway -- which reconkg
+#: already says on every such lead. The application is what an operator is
+#: actually hunting.
+#:
+#: Observed: a host returned 97 leads across Apache 2.4.6, OpenSSL 1.0.2k,
+#: PHP 7.2.34 and jQuery 2.2.4, every Apache row carrying "CentOS --
+#: distribution build". The way in was rConfig 3.9.6, an application none of
+#: those names mention and nothing in the run ever identified. The ledger was
+#: not wrong; it was answering a different question, at length.
+WEB_PLATFORM_PRODUCTS = frozenset({
+    "apache", "apache httpd", "httpd", "nginx", "iis", "lighttpd",
+    "microsoft iis httpd", "microsoft-iis", "openssl", "php", "mod_ssl",
+    "jquery", "jquery-ui", "bootstrap", "javascript", "html5", "modernizr",
+    "httpserver", "x-powered-by", "cookies", "uncommonheaders", "title",
+    "country", "ip", "script", "email", "meta-author", "openssh",
+})
 
 class GapPlanner:
     """Turns graph state into an ordered list of next actions."""
@@ -193,6 +214,38 @@ class GapPlanner:
                     module=self._assign(gap),
                     options={"RHOST": host.address},
                     priority=0.55))
+
+            # The stack was identified and the application was not, which is
+            # a different answer from "the web layer is understood" and used
+            # to be indistinguishable from it: NO_WEB_FINGERPRINT closes as
+            # soon as *any* whatweb fingerprint arrives, and Apache, OpenSSL,
+            # PHP and jQuery all arrive together.
+            #
+            # Ranked above every other gap because it is the one an operator
+            # can act on immediately and cheaply -- by opening the page. The
+            # version string that matters is frequently in a footer or a
+            # login banner, where no fingerprinter looks and a human reads it
+            # in two seconds.
+            if web and svc.fingerprints:
+                named = {(fp.product or "").strip().lower()
+                         for fp in svc.fingerprints}
+                named.discard("")
+                if named and named <= WEB_PLATFORM_PRODUCTS:
+                    out.append(Recommendation(
+                        gap=Gap.NO_WEB_APPLICATION, target=host.address,
+                        port=port.number, protocol=port.protocol,
+                        action="handoff", module=None,
+                        reason=(
+                            "Only the platform was identified here: "
+                            f"{', '.join(sorted(named))}. Those describe what "
+                            "the application runs on, not what it is, and on "
+                            "a distribution build their CVEs are usually "
+                            "backported -- every lead below them says so. The "
+                            "application itself is unnamed, so nothing in the "
+                            "ledger is about it. Open the page and read what "
+                            "it calls itself; a version in a footer beats "
+                            "sixty stack CVEs."),
+                        priority=0.85))
 
             for a, b in svc.contradictions(floor):
                 out.append(Recommendation(

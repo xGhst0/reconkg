@@ -1279,6 +1279,7 @@ const GAP_LABELS = {
   confidence_below_correlation_floor: "below the correlation floor",
   single_submitter: "uncorroborated",
   http_service_without_app_fingerprint: "no web-layer fingerprint",
+  web_platform_identified_application_not: "application not identified",
   port_filtered_not_resolved: "filtered",
   credible_claims_conflict: "contradiction"
 };
