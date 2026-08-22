@@ -1395,9 +1395,16 @@ async function findCves() {
         const web = await api("/api/targets/" + encodeURIComponent(address) +
                               "/webscan", {method: "POST"});
         const apps = (web.apps || []).length;
-        if (apps) {
-          logEvent("web layer: " + apps + " application fingerprint(s)", "ok");
-        }
+        //  Reported whether or not it found anything. `if (apps)` meant a
+        //  pass that ran and returned nothing was completely silent, which
+        //  reads exactly like a pass that never ran -- and those two want
+        //  opposite responses: install whatweb, or work out why it saw
+        //  nothing on a host that plainly serves pages. That is the
+        //  ambiguity this project refuses everywhere else, reintroduced
+        //  here by an `if`.
+        logEvent("web layer: " + apps + " application fingerprint(s) from " +
+                 (web.ports || []).length + " HTTP port(s)",
+                 apps ? "ok" : "err");
       } catch (err) {
         //  409 is "this host runs no HTTP service", an ordinary outcome and
         //  not a failure. Everything else is worth showing -- but none of it
