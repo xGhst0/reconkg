@@ -321,19 +321,29 @@ def web_available() -> Optional[str]:
     return shutil.which(WEB_BINARY)
 
 
-def _web_url(address: str, port: int, service: str) -> str:
+def _web_url(address: str, port: int, service: str,
+             tunnel: Optional[str] = None) -> str:
     """One URL, built from validated parts and nothing else.
 
-    The scheme comes from the service nmap identified rather than from the
-    port number: 8443 is not always TLS and 443 is not always HTTPS, and
-    guessing produces a scan of the wrong protocol that reports nothing
-    while looking like it ran.
+    The scheme comes from nmap's `tunnel` attribute FIRST and the service
+    name second, and getting that order wrong is not a cosmetic error.
+
+    nmap reports a TLS web service as `service="http" tunnel="ssl"` -- the
+    name alone says http. Reading only the name fetched port 443 as
+    `http://host:443/`, Apache answered `400 Bad Request`, and the page
+    title recorded as the application's identity was therefore
+    "400 Bad Request". On the host that exposed this, the real title was
+    "rConfig - Configuration Management", which was the one thing the whole
+    web pass existed to find.
+
+    The port number is deliberately not consulted: 8443 is not always TLS
+    and 443 is not always HTTPS. The tunnel is what nmap actually observed.
     """
     number = int(port)
     if not 1 <= number <= 65535:
         raise ScannerError(f"port out of range: {port}")
-    scheme = "https" if service == "https" else "http"
-    return f"{scheme}://{address}:{number}/"
+    secure = (tunnel or "").strip().lower() == "ssl" or service == "https"
+    return f"{'https' if secure else 'http'}://{address}:{number}/"
 
 
 def build_web_argv(target: str, ports, json_path: str) -> tuple[str, ...]:
@@ -352,7 +362,13 @@ def build_web_argv(target: str, ports, json_path: str) -> tuple[str, ...]:
 
     address = validate_address(target)
     urls = []
-    for port, service in ports:
+    for entry in ports:
+        # Two- or three-tuples: (port, service) or (port, service, tunnel).
+        # Tolerant because the tunnel is the fix for a bug the two-tuple
+        # form caused, and a caller that has not been updated should degrade
+        # to the old behaviour rather than raise.
+        port, service = entry[0], entry[1]
+        tunnel = entry[2] if len(entry) > 2 else None
         if service not in HTTP_SERVICES:
             # The caller here is our own route, so this is not a filter on
             # hostile input. It is a guard against a bug that would
@@ -362,7 +378,7 @@ def build_web_argv(target: str, ports, json_path: str) -> tuple[str, ...]:
             raise ScannerError(
                 f"{service!r} on port {port} is not an HTTP service; "
                 f"whatweb runs only against {', '.join(HTTP_SERVICES)}")
-        urls.append(_web_url(address, port, service))
+        urls.append(_web_url(address, port, service, tunnel))
     if not urls:
         raise ScannerError("no HTTP services to fingerprint")
 

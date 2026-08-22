@@ -655,7 +655,8 @@ async def web_scan(
             404, f"no such target: {address}. Scan it first -- the web layer "
                  "is fingerprinted on ports already known to speak HTTP.")
 
-    ports = [(port.number, port.service.name) for port in host.ports
+    ports = [(port.number, port.service.name, port.service.tunnel)
+             for port in host.ports
              if port.service and port.service.name in runner.HTTP_SERVICES]
     if not ports:
         # 409 rather than an empty success: "nothing to do" and "found
