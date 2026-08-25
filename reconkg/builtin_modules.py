@@ -15,7 +15,8 @@ from datetime import date
 from .modules import (ModuleInfo, Option, OptType, Rank, RefType, Reference,
                       ReconModule, registry)
 from .stages import (BannerStage, ConnectSweepStage, DeepProbeStage,
-                     HttpAppStage, Outcome, PortSweepStage, StageResult)
+                     HttpAppStage, OperatorStage, Outcome, PortSweepStage,
+                     StageResult)
 
 AUTHOR = "reconkg built-ins"
 
@@ -206,18 +207,55 @@ class HttpAppModule(_OptionBackedStage, HttpAppStage):
     )
 
 
+@registry.register
+class OperatorEvidenceModule(_OptionBackedStage, OperatorStage):
+    meta = ModuleInfo(
+        fullname="recon/operator/observed",
+        name="Operator observation (evidence import)",
+        description=(
+            "Imports what a human read off the target: a version in a page "
+            "footer, a login banner, an About box. The only source in the "
+            "registry with a 1.0 ceiling, and the only one that can answer "
+            "an 'uncorroborated' gap -- corroboration is measured on the "
+            "submitting principal, and every automated stage submits as the "
+            "same one."),
+        authors=(AUTHOR,),
+        rank=Rank.EXCELLENT,
+        platforms=("agnostic",),
+        references=(Reference(RefType.ATTACK, "T1592.002"),),
+        notes=("Runs last so a human's reading lands on top of what the "
+               "tools inferred rather than under it.",
+               "Never reports AMBIGUOUS: one version somebody is sure of is "
+               "not evidence against a fingerprint on another port.",
+               CONFIDENCE_NOTE),
+    )
+    option_spec = (
+        _rhost_option(),
+        _timeout_option(5.0),
+        _confidence_option(1.0, "Default confidence for operator claims"),
+    )
+
+
 BUILTIN_MODULES = (
     SynSweepModule, ConnectSweepModule, BannerProbeModule,
-    DeepProbeModule, HttpAppModule,
+    DeepProbeModule, HttpAppModule, OperatorEvidenceModule,
 )
 
 
 def module_pipeline():
-    """The default pipeline, expressed in modules rather than raw stages."""
+    """The default pipeline, expressed in modules rather than raw stages.
+
+    Kept in step with `engine.default_pipeline()` by hand, which is a seam
+    worth naming: these are two spellings of one pipeline, `app.py` runs this
+    one and `demo.py` runs the other, and a stage added to only one of them
+    is a feature that works everywhere except the web UI. `test_wiring.py`
+    asserts they hold the same stages for exactly that reason.
+    """
     from .engine import StageSlot
     return [
         StageSlot(SynSweepModule(), [ConnectSweepModule()],
                   label="port-discovery"),
         StageSlot(BannerProbeModule(), [DeepProbeModule()], label="service-id"),
         StageSlot(HttpAppModule(), [], label="web-layer"),
+        StageSlot(OperatorEvidenceModule(), [], label="operator-evidence"),
     ]

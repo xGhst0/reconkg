@@ -146,7 +146,21 @@ class VulnEntry:
         if criterion not in product:
             return False, "product mismatch"
         if not fp.version:
-            if self.requires_version:
+            # `requires_version` is set for every entry reached through the
+            # alias table, which has no version bounds at all -- so without
+            # it a fingerprint would attach to each of them regardless of
+            # version. That guard is about a *versioned* fingerprint meeting
+            # an unbounded entry, and it stays.
+            #
+            # An unversioned fingerprint is the other case, and here there
+            # is nothing to bound: refusing is not caution, it is silence
+            # about a product the corpus knows. `Fingerprint.application`
+            # is the one permission that says the silence is not wanted, and
+            # it is granted only where the product was recognised by name,
+            # is not a platform component, and has few enough CVEs to read.
+            # `build_leads` consults the same flag; two gates on one idea
+            # have to read the same bit or one of them is decorative.
+            if self.requires_version and not getattr(fp, "application", False):
                 return False, "no version to test constraints against"
             return True, f"product match on {fp.product}; version unknown"
         try:
@@ -199,6 +213,15 @@ class CorrelationConfig:
     """Emit low-priority leads for product-only matches. Off by default --
     this is the single biggest source of ledger noise."""
     max_leads_per_service: int = 12
+    max_unversioned_leads: int = 6
+    """Budget for leads on a fingerprint that names a product but no version.
+
+    Smaller than the versioned cap on purpose. These are the corpus's whole
+    file on a product rather than a version match, so they are a reading list
+    and not a set of findings; six is enough for an operator to see what the
+    application is known for and few enough that they cannot bury the
+    version-matched rows they sit beside.
+    """
     backport_penalty: float = 0.25
     """Multiplier for a lead built on a distribution-packaged version string.
 
@@ -320,9 +343,27 @@ def build_leads(fp: Fingerprint, reference: Iterable[VulnEntry],
     from .cpe import MatchMethod, looks_backported
 
     backport_marker = looks_backported(fp.version, fp.raw_banner)
+
+    # An unversioned fingerprint normally produces nothing, and for a stack
+    # component that is right: `include_unversioned` is off by default
+    # because product-only matching carries no version bounds and gave an
+    # IIS 10.0 host two 2008 ActiveX CVEs.
+    #
+    # It is not right for a named application. A host ran rConfig behind
+    # Apache; the ledger held 97 leads, every one about Apache, OpenSSL, PHP
+    # or jQuery, every Apache row annotated "distribution build -- the fix
+    # may be applied without a version bump", and nothing at all about the
+    # application. Silence there is not caution, it is the tool declining to
+    # say the one thing it knew. `Fingerprint.application` is set only where
+    # the corpus recognised the product name and the product is not a
+    # platform piece, which is exactly the case where the full list of CVEs
+    # filed against that product is short enough for a human to read and
+    # honest enough to hand over marked "version unknown".
+    unversioned_ok = cfg.include_unversioned or bool(
+        getattr(fp, "application", False))
     leads: list[VulnLead] = []
     for entry in reference:
-        if not fp.version and not cfg.include_unversioned:
+        if not fp.version and not unversioned_ok:
             continue
         ok, rationale, method = entry.matches(fp)
         if not ok:
@@ -355,10 +396,21 @@ def build_leads(fp: Fingerprint, reference: Iterable[VulnEntry],
                           "distribution build; the fix may be applied without "
                           "a version bump" if backport_marker else "")
                        + (f" | {exploitation}" if exploitation else "")
+                       + (" | VERSION UNKNOWN: this is every CVE the corpus "
+                          f"files against {fp.product}, not a version match. "
+                          "Read the version off the application and submit it "
+                          "to narrow this" if not fp.version else "")
                        + f" | matched by {method.value}"),
             priority=priority,
             provenance=Provenance(source_tool="correlator",
                                   confidence=fp.confidence),
         ))
     leads.sort(key=lambda l: l.priority, reverse=True)
-    return leads[: cfg.max_leads_per_service]
+    # A version-unknown list is a different kind of answer and gets a
+    # different budget. Twelve rows of "every CVE ever filed against this
+    # product" would out-shout the versioned leads on the same host by
+    # weight of numbers alone, which is how the ledger came to hold 97 rows
+    # about a stack nobody was attacking.
+    cap = (cfg.max_leads_per_service if fp.version
+           else min(cfg.max_unversioned_leads, cfg.max_leads_per_service))
+    return leads[:cap]

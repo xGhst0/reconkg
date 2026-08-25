@@ -183,6 +183,21 @@ class Fingerprint(GraphNode):
     raw_banner: Optional[str] = None
     ambiguous: bool = False
     """Set when a source could not commit to a single product/version."""
+    application: bool = False
+    """The corpus knows this product by name and it is not a platform piece.
+
+    Set by `webid.resolve_identity` when a raw product claim -- typically a
+    page title -- was arbitrated against the corpus and recognised. It is the
+    only permission `build_leads` accepts for emitting product-only leads on
+    a fingerprint that has no version.
+
+    What it encodes is the difference between "Apache, version unknown",
+    which is twenty years of unrelated CVEs and the reason product-only
+    matching is off by default, and "rConfig, version unknown", which is a
+    short list an operator can read in full. Defaulting to False keeps every
+    existing snapshot, and every source that does not set it, on exactly
+    today's behaviour.
+    """
 
     @property
     def key(self) -> str:
@@ -245,6 +260,11 @@ class Service(GraphNode):
             if existing.key == fp.key:
                 existing.observe(fp.provenance)
                 existing.ambiguous = existing.ambiguous and fp.ambiguous
+                # OR, where `ambiguous` is AND, and for the same reason: both
+                # move toward the more committed claim. One source having
+                # placed this product in the corpus is not unlearned because
+                # a second source did not try.
+                existing.application = existing.application or fp.application
                 existing.raw_banner = existing.raw_banner or fp.raw_banner
                 existing.cpe = existing.cpe or fp.cpe
                 return existing

@@ -546,6 +546,63 @@ class VulnDB:
             (product,)).fetchone()
         return row is not None
 
+    def product_vendor(self, product: str) -> Optional[str]:
+        """The vendor this corpus mostly files a product under, or None.
+
+        Both halves of one question. `knows_product` answers whether the
+        corpus has heard of a product, and the caller that gets "yes"
+        immediately needs to know under whose name: a product with no vendor
+        cannot be turned into a CPE, and without a CPE the lookup drops to
+        the substring path, which carries no version bounds at all. Asking
+        the two questions separately would be two queries free to disagree.
+
+        Ordered by how many applicability statements each vendor accounts
+        for, because a product genuinely filed under more than one vendor --
+        an acquisition, a rename, a fork -- should resolve to the one this
+        corpus mostly means. `candidates_for_cpe` already relaxes the vendor
+        on its second tier, so a wrong majority costs a widened query rather
+        than a miss.
+
+        `vendor = '*'` is excluded rather than counted or returned: NVD
+        applicability legitimately carries a wildcard vendor, and
+        `candidates_for_cpe`'s `OR a.vendor = '*'` clause already matches
+        those rows for any vendor supplied. Returning `'*'` here would get
+        baked into a built CPE by `_cpe_for` and passed back in as the
+        *supplied* vendor, where the same query reads it literally --
+        `a.vendor = '*'` -- and matches only the wildcard rows instead of
+        every vendor, silently narrowing rather than widening.
+        """
+        key = (product or "").strip().lower()
+        if not key:
+            return None
+        row = self._conn.execute(
+            "SELECT vendor FROM applicability WHERE product = ? "
+            "AND vendor != '*' AND vendor != '' "
+            "GROUP BY vendor ORDER BY COUNT(*) DESC LIMIT 1",
+            (key,)).fetchone()
+        return (row["vendor"] or "").strip() if row else None
+
+    def product_cve_count(self, product: str) -> int:
+        """How many distinct CVEs this corpus files against a product.
+
+        The measure of whether "product X, version unknown" is an answer or
+        a database dump. rConfig has a couple of dozen and listing them is
+        the most useful thing a tool can do for an operator who cannot read
+        the version off the page. MySQL has thousands spanning twenty years
+        of unrelated releases, and listing those says nothing about the host
+        while burying everything that does.
+
+        Counting distinct CVEs rather than applicability rows: a single CVE
+        naming forty affected versions is one thing to read, not forty.
+        """
+        key = (product or "").strip().lower()
+        if not key:
+            return 0
+        row = self._conn.execute(
+            "SELECT COUNT(DISTINCT cve_id) AS n FROM applicability "
+            "WHERE product = ?", (key,)).fetchone()
+        return int(row["n"]) if row else 0
+
     def candidates(self, observed: Optional[CPE], product: Optional[str],
                    limit: int = 500) -> list[VulnEntry]:
         """The lookup the engine actually calls.

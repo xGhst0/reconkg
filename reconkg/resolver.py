@@ -88,6 +88,50 @@ class StaticResolver:
     def candidates(self, fp: Fingerprint) -> Sequence[VulnEntry]:
         return self._entries
 
+    def product_vendor(self, product: str) -> Optional[str]:
+        """The vendor these entries file a CPE-spelled product under.
+
+        The arbiter `webid.resolve_identity` consults before it will read a
+        page title as a product name. Answered from the same entries that
+        produce the leads, because a second source could say yes here while
+        correlation stays silent -- the split-source bug `entry_for` below
+        was written about.
+        """
+        from .webid import cpe_product
+
+        key = (product or "").strip().lower()
+        if not key:
+            return None
+        for entry in self._entries:
+            match = (entry.product_match or "").strip().lower()
+            if not match or (cpe_product(match) != key and match != key):
+                continue
+            for statement in entry.cpe_ranges:
+                if statement.cpe.vendor and statement.cpe.vendor != "*":
+                    return statement.cpe.vendor
+            # Known by product name, but this entry carries no CPE to name a
+            # vendor with -- a CVE still awaiting analysis, in this
+            # codebase's words. `None` here, not the product name: `_cpe_for`
+            # treats a truthy vendor as licence to build one, and a
+            # fabricated vendor bakes a specific wrong identity into the
+            # graph rather than leaving the honest gap. In the real corpus
+            # this is rare to the point of moot -- `feeds._nvd_entry` derives
+            # `product_match` from the same `cpe_ranges` this loop just
+            # walked, so the two are populated together or not at all.
+            continue
+        return None
+
+    def product_cve_count(self, product: str) -> int:
+        """How many of these entries are filed against a product."""
+        from .webid import cpe_product
+
+        key = (product or "").strip().lower()
+        if not key:
+            return 0
+        return sum(1 for e in self._entries
+                   if (m := (e.product_match or "").strip().lower())
+                   and (cpe_product(m) == key or m == key))
+
     def entry_for(self, cve_id: str) -> Optional[VulnEntry]:
         key = str(cve_id or "").strip().upper()
         return next((e for e in self._entries
@@ -151,6 +195,28 @@ class DbResolver:
                 observed = inferred
 
         return self._db.candidates(observed, fp.product, limit=self._limit)
+
+    def product_vendor(self, product: str) -> Optional[str]:
+        """The vendor this corpus files a product under, or None.
+
+        Straight through to `VulnDb.product_vendor`, which reads the same
+        `applicability` table the lookup itself queries -- so the arbiter
+        that decides what a page title names, and the query that acts on the
+        decision, cannot disagree about what the corpus holds.
+        """
+        try:
+            return self._db.product_vendor((product or "").strip().lower())
+        except Exception as exc:                # pragma: no cover - defensive
+            log.warning("product lookup failed for %r: %s", product, exc)
+            return None
+
+    def product_cve_count(self, product: str) -> int:
+        """How many distinct CVEs this corpus files against a product."""
+        try:
+            return self._db.product_cve_count((product or "").strip().lower())
+        except Exception as exc:                # pragma: no cover - defensive
+            log.warning("product count failed for %r: %s", product, exc)
+            return 0
 
     def entry_for(self, cve_id: str) -> Optional[VulnEntry]:
         """Indexed by primary key, so this is a seek rather than a scan."""

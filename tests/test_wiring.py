@@ -478,3 +478,102 @@ def test_the_console_closes_its_corpora_too(monkeypatch, tmp_path):
     console.close()
     with pytest.raises(sqlite3.ProgrammingError):
         exploits.exploits_for(CVE)
+
+
+# --------------------------------------------------------------------------- #
+# The two spellings of one pipeline
+# --------------------------------------------------------------------------- #
+#
+# `engine.default_pipeline()` and `builtin_modules.module_pipeline()` are the
+# same pipeline written twice: `demo.py` runs the first, `app.py` runs the
+# second, and nothing made them agree. A stage added to one is a feature that
+# works everywhere except the web UI -- this file's subject with a different
+# pair of names. It caught the operator-evidence stage being added to the raw
+# pipeline and not the module one.
+
+def _tools(slots) -> list[list[str]]:
+    return [[slot.primary.tool] + [f.tool for f in slot.fallbacks]
+            for slot in slots]
+
+
+def test_both_pipelines_run_the_same_stages_in_the_same_order():
+    from reconkg.builtin_modules import module_pipeline
+    from reconkg.engine import default_pipeline
+
+    assert _tools(default_pipeline()) == _tools(module_pipeline())
+
+
+def test_both_pipelines_label_their_slots_identically():
+    """Labels are what a stage report is read by. Two surfaces naming the
+    same work differently is the same defect one level down."""
+    from reconkg.builtin_modules import module_pipeline
+    from reconkg.engine import default_pipeline
+
+    assert ([s.label for s in default_pipeline()]
+            == [s.label for s in module_pipeline()])
+
+
+def test_the_app_pipeline_collects_operator_evidence():
+    """`/api/evidence` accepted `tool: "operator"` from the day evidence
+    submission existed, the registry gives it the only 1.0 ceiling in the
+    table, and no stage ever collected it. Submissions returned 201, reported
+    that ceiling back to the caller, and were staged into a bin nothing read
+    -- an accepted write that changes nothing, indistinguishable at the point
+    of use from one that worked."""
+    from reconkg.builtin_modules import module_pipeline
+
+    assert "operator" in [slot.primary.tool for slot in module_pipeline()]
+
+
+def test_operator_evidence_reaches_the_ledger(offline):
+    """End to end over HTTP, which is the only proof that matters here."""
+    _module, c = offline
+    c.post("/api/targets", json={"address": TARGET}, headers=OPERATOR)
+    c.post("/api/evidence", headers=SCANNER, json={
+        "tool": "nmap-sT", "address": TARGET,
+        "data": {"ports": [{"number": 80, "state": "open",
+                            "confidence": 0.9}]}})
+    # No service name: the operator read a version off a page and has no
+    # opinion about which protocol answers the socket.
+    c.post("/api/evidence", headers=SCANNER, json={
+        "tool": "operator", "address": TARGET,
+        "data": {"services": [{"port": 80, "product": "Apache httpd",
+                               "version": "2.4.49", "confidence": 1.0}]}})
+    c.post(f"/api/targets/{TARGET}/scan", headers=SCANNER)
+    ledger = c.get(f"/api/targets/{TARGET}/ledger", headers=VIEWER).json()
+    assert any(row["cve_id"] == CVE for row in ledger), ledger
+
+
+def test_the_operator_counts_as_a_second_principal(offline):
+    """The whole point of the 1.0 ceiling. Corroboration is measured on the
+    submitting principal, and every automated stage submits as the same one,
+    so no amount of re-running tools can close an "uncorroborated" gap."""
+    _module, c = offline
+    c.post("/api/targets", json={"address": TARGET}, headers=OPERATOR)
+    c.post("/api/evidence", headers=SCANNER, json={
+        "tool": "nmap-sT", "address": TARGET,
+        "data": {"ports": [{"number": 80, "state": "open"}]}})
+    c.post("/api/evidence", headers=SCANNER, json={
+        "tool": "nmap-sV-intensity9", "address": TARGET,
+        "data": {"services": [{"port": 80, "service": "http",
+                               "product": "Apache httpd",
+                               "version": "2.4.49", "confidence": 0.9}]}})
+    c.post("/api/evidence", headers=OPERATOR, json={
+        "tool": "operator", "address": TARGET,
+        "data": {"services": [{"port": 80, "product": "Apache httpd",
+                               "version": "2.4.49", "confidence": 1.0}]}})
+    c.post(f"/api/targets/{TARGET}/scan", headers=SCANNER)
+    ledger = c.get(f"/api/targets/{TARGET}/ledger", headers=VIEWER).json()
+    row = next(r for r in ledger if r["cve_id"] == CVE)
+    assert len(row["independent_principals"]) >= 2, row
+
+
+def test_the_page_offers_a_way_to_submit_what_you_read(offline):
+    """The Coverage panel files gaps under "operator judgement" and the page
+    had no control for answering one. A recommendation with no affordance is
+    a to-do list, not a tool."""
+    _module, c = offline
+    page = c.get("/ui", headers=VIEWER).text
+    for marker in ('id="obs-product"', 'id="obs-version"', 'id="obs-port"',
+                   "submitObserved"):
+        assert marker in page, marker

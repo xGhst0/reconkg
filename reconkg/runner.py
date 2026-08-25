@@ -486,9 +486,14 @@ def parse_whatweb(raw: str) -> list[dict]:
         # `NO_WEB_APPLICATION` was added to complain about, with the answer
         # already in hand.
         #
-        # Recorded ambiguous and below the correlation floor on purpose. A
-        # page title is a claim about identity, not about version, and it
-        # must name the application without ever producing a lead on its own.
+        # Recorded ambiguous and below the correlation floor, and handed on
+        # raw. A page title is prose -- "rConfig - Configuration Management"
+        # is a product and a tagline, "400 Bad Request" is not a product at
+        # all -- and deciding which is which needs a corpus to arbitrate
+        # against. That happens in `DiscoveryEngine._identify`, on the one
+        # path every observation takes, so nmap and imported scans get the
+        # same treatment. Doing it here would fix the whatweb path and leave
+        # the other three writing status lines into the graph.
         title = plugins.get("Title")
         if isinstance(title, dict) and found < MAX_APPS_PER_PORT:
             names = [str(s).strip() for s in (title.get("string") or [])

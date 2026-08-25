@@ -84,25 +84,12 @@ class Recommendation:
         return f"use {self.module}; {sets}; run".replace(" ;", ";")
 
 
-#: Products that describe what a web application RUNS ON rather than what it
-#: is. whatweb reports both in one list and they are not the same kind of
-#: claim: Apache, OpenSSL, PHP and jQuery are the stack, and on a
-#: distribution build their CVEs are backported anyway -- which reconkg
-#: already says on every such lead. The application is what an operator is
-#: actually hunting.
-#:
-#: Observed: a host returned 97 leads across Apache 2.4.6, OpenSSL 1.0.2k,
-#: PHP 7.2.34 and jQuery 2.2.4, every Apache row carrying "CentOS --
-#: distribution build". The way in was rConfig 3.9.6, an application none of
-#: those names mention and nothing in the run ever identified. The ledger was
-#: not wrong; it was answering a different question, at length.
-WEB_PLATFORM_PRODUCTS = frozenset({
-    "apache", "apache httpd", "httpd", "nginx", "iis", "lighttpd",
-    "microsoft iis httpd", "microsoft-iis", "openssl", "php", "mod_ssl",
-    "jquery", "jquery-ui", "bootstrap", "javascript", "html5", "modernizr",
-    "httpserver", "x-powered-by", "cookies", "uncommonheaders", "title",
-    "country", "ip", "script", "email", "meta-author", "openssh",
-})
+#: Re-exported from `webid`, which is where the set now lives: two callers
+#: need it and the second one decides whether a fingerprint may generate
+#: leads at all. A set that gates behaviour on one path and merely annotates
+#: on another is this codebase's most-repeated bug.
+from .webid import WEB_PLATFORM_PRODUCTS  # noqa: E402,F401  (re-export)
+
 
 class GapPlanner:
     """Turns graph state into an ordered list of next actions."""

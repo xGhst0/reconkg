@@ -52,6 +52,8 @@ class FingerprintObs:
     cpe: Optional[str] = None
     banner: Optional[str] = None
     ambiguous: bool = False
+    application: bool = False
+    """Set by the identity arbiter; travels to `Fingerprint.application`."""
     protocol: str = "tcp"
     confidence: float = 0.6
 
@@ -231,6 +233,102 @@ class BannerStage(DiscoveryStage):
             )
         return StageResult(Outcome.SUCCESS, f"{len(data['services'])} services",
                            obs, [e["port"] for e in data["services"]])
+
+
+class OperatorStage(DiscoveryStage):
+    """What a human read, which no fingerprinter could have told us.
+
+    `/api/evidence` has accepted `tool: "operator"` since evidence submission
+    existed, the source registry gives it the only 1.0 reliability in the
+    table, and no stage ever collected it. Submissions returned 201, reported
+    that ceiling back to the caller, and were staged into a bin nothing read.
+    An accepted write that changes nothing is the worst shape this project
+    has, because at the point of use it is indistinguishable from one that
+    worked.
+
+    Runs last, and that is the point. Every other stage is a tool inferring
+    from bytes on the wire; this is the operator saying what the page says
+    about itself. It is how the version in a footer -- the thing the Coverage
+    panel asks for by name on every gap it files under "operator judgement"
+    -- gets into the graph at all, and being a second principal it is also
+    the only submission that can answer "uncorroborated".
+
+    Never returns AMBIGUOUS. `_downgrade` reads that outcome as evidence
+    against unresolved fingerprints, and a human submitting one version they
+    are sure of is no reason to trust nmap less about a different port.
+    """
+
+    name = "operator-evidence"
+    technique = "read by a human"
+    tool = "operator"
+    timeout_s = 5.0
+
+    async def run(self, address, evidence, context) -> StageResult:
+        data = await evidence.collect(self.tool, address)
+        if not data:
+            return StageResult(Outcome.NO_DATA, "nothing submitted")
+
+        obs: list[Observation] = []
+        ports: list[int] = []
+        for entry in (data.get("services") or []):
+            try:
+                port = int(entry["port"])
+            except (KeyError, TypeError, ValueError):
+                log.warning("operator evidence entry with no usable port: %r",
+                            entry)
+                continue
+            product = entry.get("product")
+            version = entry.get("version")
+            if not entry.get("service") and not product and not version:
+                continue
+            ports.append(port)
+            confidence = float(entry.get("confidence", 1.0))
+
+            # The port, first and unconditionally. `record_port`/`set_service`
+            # both require the port to already exist in the store, and this
+            # stage cannot read the store to check -- `run()` only sees
+            # `evidence` and this run's own `context`, which starts empty
+            # every scan. A cold target an operator adds and never scans
+            # first is not exotic: it is exactly the case this control exists
+            # for, since the whole point is answering a gap without needing
+            # a tool installed. Reading content from a port is itself
+            # evidence it was open; asserting that is not a guess.
+            obs.append(PortObs(number=port, confidence=confidence))
+
+            # Optional, deliberately. An operator reading a version off a
+            # login page has an opinion about the application and none about
+            # which protocol answers the socket; requiring a service name
+            # would make them invent one, and an invented protocol overwrites
+            # a probed fact with a typed guess. Where nothing is known yet
+            # this still has to name *something* for the fingerprint below to
+            # attach to -- `unknown` is nmap's own word for exactly this, and
+            # `set_service` never lets a placeholder overwrite a real name:
+            # against an existing service it only merges provenance in.
+            service_name = str(entry["service"]) if entry.get("service") \
+                else "unknown"
+            obs.append(ServiceObs(port=port, name=service_name,
+                                  tunnel=entry.get("tunnel"),
+                                  confidence=confidence))
+            # setdefault, not assignment: this stage runs last, and a
+            # placeholder must not overwrite what an earlier stage already
+            # put in this run's own context, even though nothing downstream
+            # reads it this run -- the store-level merge is already
+            # non-destructive and the scratch dict should not disagree with it.
+            context.setdefault("services", {}).setdefault(port, service_name)
+
+            if not product and not version:
+                continue
+            obs.append(FingerprintObs(
+                port=port, product=product, version=version,
+                cpe=entry.get("cpe"), banner=entry.get("banner") or product,
+                ambiguous=bool(entry.get("ambiguous", not version)),
+                confidence=confidence))
+
+        if not obs:
+            return StageResult(Outcome.NO_DATA, "no usable entries")
+        return StageResult(Outcome.SUCCESS,
+                           f"{len(obs)} observation(s) from the operator",
+                           obs, sorted(set(ports)))
 
 
 class DeepProbeStage(BannerStage):

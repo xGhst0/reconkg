@@ -245,6 +245,27 @@ _TEMPLATE = r"""
              accept=".xml,text/xml,application/xml">
       <button id="import">import XML</button>
     </div>
+    <!-- What the operator can see and no fingerprinter can. Every gap the
+         Coverage panel files under "operator judgement" ends here: a version
+         in a page footer, a login banner, an About box. The API has accepted
+         this since evidence submission existed and the page never offered a
+         way in, so the gap reconkg is loudest about was the one gap it gave
+         no control for.
+
+         Submitted under the operator's own principal, which is the point.
+         A human who read the string is the most reliable source the registry
+         knows, and it is a *second* principal -- so this closes an
+         "uncorroborated" gap as well as a "no version" one, which no amount
+         of re-running the same tool can do. -->
+    <div class="row">
+      <label for="obs-port" class="dim">I read</label>
+      <input id="obs-product" size="14" placeholder="rConfig"
+             autocomplete="off">
+      <input id="obs-version" size="9" placeholder="3.9.6" autocomplete="off">
+      <label for="obs-port" class="dim">on port</label>
+      <input id="obs-port" size="5" placeholder="443" autocomplete="off">
+      <button id="observe" disabled>submit</button>
+    </div>
     <p class="dim" id="scan-status">idle</p>
     <!-- The command a scan ran, verbatim. See showScanCommand(). -->
     <pre class="mono-pre dim" id="nmap-command"></pre>
@@ -640,6 +661,57 @@ async function runNmap() {
     // A scan that failed still has to give the button back. Restored to
     // what the probe found, not unconditionally enabled.
     button.disabled = !scannerReady;
+  }
+}
+
+async function submitObserved() {
+  // state.target for the same reason runNmap() uses it: the graph on screen
+  // is what the operator is looking at, and attaching a hand-read version to
+  // some other host is a claim nobody made.
+  if (!state.target) { note("set a target first", "err"); return; }
+  const port = parseInt($("obs-port").value.trim(), 10);
+  const product = $("obs-product").value.trim();
+  const version = $("obs-version").value.trim();
+  if (!(port >= 1 && port <= 65535)) {
+    note("which port did you read it on?", "err"); return;
+  }
+  if (!product) { note("what did the page call itself?", "err"); return; }
+
+  const button = $("observe");
+  button.disabled = true;
+  try {
+    await api("/api/evidence", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        tool: "operator",
+        address: state.target,
+        data: {services: [{
+          port: port,
+          // The service name is not re-asserted. nmap already established
+          // what protocol answers here and an operator reading a footer has
+          // no opinion about that; overwriting it with a guess would trade a
+          // probed fact for a typed one.
+          product: product,
+          // Omitted rather than sent empty. An absent version leaves the
+          // service unresolved, which is true and is what the Coverage panel
+          // will keep saying; an empty string would read as a version.
+          version: version || null,
+          confidence: 1.0
+        }]}
+      })
+    });
+    note("recorded " + product + (version ? " " + version : "") +
+         " on port " + port + " -- correlating", "ok");
+    // Correlation, not just a redraw. The submission changed what the graph
+    // claims; leaving the ledger showing the pre-submission answer would be
+    // the same silence this control exists to break.
+    await runScan();
+    await loadPlan();
+  } catch (err) {
+    note(withHint(err.message), "err");
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -1255,6 +1327,11 @@ async function useToken() {
     $("who").className = "err";
     return;
   }
+  // Gated on the credential and on nothing else. Submitting what you read
+  // needs no tool installed, which is exactly why it is the answer offered
+  // for every gap the planner files under "operator judgement" -- including
+  // on a host where nmap is missing and the graph came in by import.
+  $("observe").disabled = false;
   await loadCorpus();
   // Alongside loadCorpus() and for the same reason: both are capability
   // probes that need a credential, and both answer "is this question even
@@ -1444,6 +1521,7 @@ $("refresh").addEventListener("click", selectTarget);
 $("target").addEventListener("change", selectTarget);
 $("nmap").addEventListener("click", runNmap);
 $("import").addEventListener("click", importXml);
+$("observe").addEventListener("click", submitObserved);
 
 renderCategories();
 renderCommands(null);

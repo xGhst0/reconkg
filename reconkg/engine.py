@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Optional, Sequence
 
@@ -34,6 +34,7 @@ from .stages import (DiscoveryStage, EvidenceSource, FingerprintObs, Outcome,
                      PortObs, ServiceObs, StageResult)
 from .vulnref import (DEFAULT_REFERENCE, CorrelationConfig, LedgerRow,
                       VulnEntry, build_leads)
+from .webid import resolve_identity
 
 log = logging.getLogger(__name__)
 
@@ -303,8 +304,135 @@ class DiscoveryEngine:
                           confidence=effective, declared_confidence=declared,
                           note=stage.technique)
 
+    #: Declared confidence given to a product claim the corpus had to
+    #: rewrite. Chosen to clear the 0.45 correlation floor after the source
+    #: registry's multiplier for either fingerprinting tool -- 0.85 for
+    #: whatweb, 0.75 for nmap-sV -- because a claim that cannot reach the
+    #: floor is one `build_leads` discards before it looks at anything else,
+    #: and arbitrating an identity nothing may act on is wasted work.
+    #:
+    #: The raise is earned rather than granted. A title alone is one tool's
+    #: reading of one string; a title the corpus recognises as a product is
+    #: that reading plus an independent body of evidence agreeing the
+    #: software exists. It applies only where the product name was actually
+    #: rewritten, so nmap's own fingerprints keep the confidence nmap earned.
+    ARBITRATED_CONFIDENCE = 0.65
+
+    #: Above this many CVEs, "product X, version unknown" stops being an
+    #: answer. nmap reports `MySQL ?` on a port it could not version, and the
+    #: corpus knows `mysql` perfectly well -- so without a ceiling the same
+    #: permission that lets rConfig speak would empty two decades of MySQL
+    #: advisories into the ledger, none of them a statement about this host.
+    #:
+    #: The number is a judgement about what a human will read, not about the
+    #: corpus. Forty rows is a list an operator scans; four hundred is the
+    #: 97-lead ledger this whole change exists to stop reproducing, with a
+    #: different product on the front.
+    APPLICATION_CVE_CEILING = 40
+
+    @staticmethod
+    def _cpe_for(identity) -> Optional[str]:
+        """A CPE for an arbitrated identity, but only once it has a version.
+
+        With a version this is the whole point: it moves the lookup off the
+        substring path -- which has no version bounds, so it would hand back
+        every CVE ever filed against the product and label the result a
+        version match -- and onto the identifier path, where applicability
+        ranges decide. An operator who reads "3.9.6" off a login page and
+        submits it gets the CVEs that affect 3.9.6.
+
+        Without a version, deliberately nothing. A CPE with a wildcard
+        version would take the same identifier path and there ask range
+        statements a question they have no way to answer, and this codebase
+        would rather run the weaker query it can explain than the stronger
+        one it cannot. The unversioned case is already handled: it is the
+        one `Fingerprint.application` exists for.
+        """
+        from .cpe import CPE
+        from .webid import cpe_product
+
+        if not identity.vendor or not identity.product or not identity.version:
+            return None
+        return str(CPE(part="a", vendor=identity.vendor.lower(),
+                       product=cpe_product(identity.product),
+                       version=identity.version.lower()))
+
+    def _is_narrow(self, identity) -> bool:
+        """Is this product's whole CVE file short enough to hand over?
+
+        The gate on product-only leads. A resolver that cannot count says
+        nothing, and silence here means "no permission" rather than "yes" --
+        a missing measurement must never read as a passed check.
+        """
+        counter = getattr(self.resolver, "product_cve_count", None)
+        if not callable(counter):
+            return False
+        from .webid import cpe_product
+
+        try:
+            total = int(counter(cpe_product(identity.product)))
+        except Exception:                       # pragma: no cover - defensive
+            log.warning("could not size %r; withholding product-only leads",
+                        identity.product)
+            return False
+        if total > self.APPLICATION_CVE_CEILING:
+            log.info("%s has %d CVEs in this corpus, over the %d ceiling; it "
+                     "needs a version before it can produce leads",
+                     identity.product, total, self.APPLICATION_CVE_CEILING)
+            return False
+        return total > 0
+
+    def _identify(self, obs: FingerprintObs) -> Optional[FingerprintObs]:
+        """Arbitrate a raw product claim against the corpus. `None` = drop it.
+
+        Placed on the one path every observation takes to become a graph
+        node, and not in the whatweb parser that produced the page title
+        which motivated it. nmap, whatweb, `--import` of a foreign scan, and
+        an operator POSTing evidence all arrive through `_apply_one`. A
+        filter installed on the whatweb path alone would be the fourteenth
+        instance of this project's standing bug -- a control implemented on
+        one path and absent from a second -- and three of the four sources
+        would go on writing HTTP status lines into the knowledge graph.
+        """
+        lookup = getattr(self.resolver, "product_vendor", None)
+        identity = resolve_identity(obs.product, obs.version,
+                                    lookup if callable(lookup) else None)
+        if identity is None:
+            log.info("dropping fingerprint %r on port %s: not a product",
+                     obs.product, obs.port)
+            return None
+        # The ceiling is only consulted where the permission is actually
+        # spent. With a version in hand the lead comes from applicability
+        # ranges and product-only matching never runs, so sizing the product
+        # would be a query asked to decide nothing.
+        application = identity.application and (
+            bool(identity.version) or self._is_narrow(identity))
+        if identity.product == obs.product and identity.version == obs.version \
+                and not application:
+            return obs
+
+        rewritten = identity.product != obs.product
+        return replace(
+            obs,
+            product=identity.product,
+            version=identity.version,
+            cpe=obs.cpe or self._cpe_for(identity),
+            application=application,
+            # A recovered version is a commitment; without one the claim is
+            # still "this software, version unknown", which is what
+            # `ambiguous` means and what the Coverage panel asks about.
+            ambiguous=obs.ambiguous and not identity.version,
+            confidence=(max(obs.confidence, self.ARBITRATED_CONFIDENCE)
+                        if rewritten else obs.confidence),
+        )
+
     async def _apply_one(self, address: str, obs, stage: DiscoveryStage,
                          context: dict) -> None:
+        if isinstance(obs, FingerprintObs):
+            identified = self._identify(obs)
+            if identified is None:
+                return
+            obs = identified
         prov = self._provenance_for(address, stage, obs.confidence)
         if isinstance(obs, PortObs):
             await self.store.record_port(address, Port(
@@ -319,6 +447,7 @@ class DiscoveryEngine:
             await self.store.record_fingerprint(address, obs.port, Fingerprint(
                 product=obs.product, version=obs.version, cpe=obs.cpe,
                 raw_banner=obs.banner, ambiguous=obs.ambiguous,
+                application=obs.application,
                 provenance=prov), protocol=obs.protocol)
         else:  # pragma: no cover - guarded by the Observation union
             raise TypeError(f"unknown observation {type(obs).__name__}")
@@ -427,9 +556,13 @@ def _backport_of(fp) -> Optional[str]:
 
 def default_pipeline() -> list[StageSlot]:
     from .stages import (BannerStage, ConnectSweepStage, DeepProbeStage,
-                         HttpAppStage, PortSweepStage)
+                         HttpAppStage, OperatorStage, PortSweepStage)
     return [
         StageSlot(PortSweepStage(), [ConnectSweepStage()], label="port-discovery"),
         StageSlot(BannerStage(), [DeepProbeStage()], label="service-id"),
         StageSlot(HttpAppStage(), [], label="web-layer"),
+        # Last, so a human's reading lands on top of what the tools inferred
+        # rather than under it. It has no fallback because there is nothing to
+        # fall back to: if the operator submitted nothing, nobody knows.
+        StageSlot(OperatorStage(), [], label="operator-evidence"),
     ]
